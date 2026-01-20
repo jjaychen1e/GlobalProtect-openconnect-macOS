@@ -163,8 +163,8 @@ pub enum Credential {
 }
 
 impl Credential {
-  /// Create a credential from a globalprotectcallback:<base64 encoded string>,
-  /// or globalprotectcallback:cas-as=1&un=user@xyz.com&token=very_long_string
+  /// Create a credential from a globalprotectcallback1:<base64 encoded string>,
+  /// or globalprotectcallback1:cas-as=1&un=user@xyz.com&token=very_long_string
   pub fn from_gpcallback(auth_data: &str) -> anyhow::Result<Self> {
     let auth_data = SamlAuthData::from_gpcallback(auth_data)?;
 

@@ -1,5 +1,5 @@
 use anyhow::bail;
-use gpapi::{auth::SamlAuthData, error::AuthDataParseError};
+use gpapi::{auth::SamlAuthData, error::AuthDataParseError, GP_CALLBACK_SCHEME};
 use log::{error, info};
 use regex::Regex;
 use tokio::sync::{mpsc, RwLock};
@@ -183,7 +183,8 @@ impl AuthMessenger {
 }
 
 fn extract_gpcallback(html: &str) -> Option<String> {
-  let re = Regex::new(r#"globalprotectcallback:[^"]+"#).unwrap();
+  let pattern = format!(r#"{}:[^"]+"#, GP_CALLBACK_SCHEME);
+  let re = Regex::new(&pattern).unwrap();
   re.captures(html)
     .and_then(|captures| captures.get(0))
     .map(|m| html_escape::decode_html_entities(m.as_str()).to_string())
@@ -195,26 +196,32 @@ mod tests {
 
   #[test]
   fn extract_gpcallback_some() {
-    let html = r#"
-      <meta http-equiv="refresh" content="0; URL=globalprotectcallback:PGh0bWw+PCEtLSA8c">
-      <meta http-equiv="refresh" content="0; URL=globalprotectcallback:PGh0bWw+PCEtLSA8c">
-    "#;
+    let html = format!(
+      r#"
+      <meta http-equiv="refresh" content="0; URL={}:PGh0bWw+PCEtLSA8c">
+      <meta http-equiv="refresh" content="0; URL={}:PGh0bWw+PCEtLSA8c">
+    "#,
+      GP_CALLBACK_SCHEME, GP_CALLBACK_SCHEME
+    );
 
     assert_eq!(
-      extract_gpcallback(html).as_deref(),
-      Some("globalprotectcallback:PGh0bWw+PCEtLSA8c")
+      extract_gpcallback(&html).as_deref(),
+      Some(format!("{}:PGh0bWw+PCEtLSA8c", GP_CALLBACK_SCHEME).as_str())
     );
   }
 
   #[test]
   fn extract_gpcallback_cas() {
-    let html = r#"
-      <meta http-equiv="refresh" content="0; URL=globalprotectcallback:cas-as=1&amp;un=xyz@email.com&amp;token=very_long_string">
-    "#;
+    let html = format!(
+      r#"
+      <meta http-equiv="refresh" content="0; URL={}:cas-as=1&amp;un=xyz@email.com&amp;token=very_long_string">
+    "#,
+      GP_CALLBACK_SCHEME
+    );
 
     assert_eq!(
-      extract_gpcallback(html).as_deref(),
-      Some("globalprotectcallback:cas-as=1&un=xyz@email.com&token=very_long_string")
+      extract_gpcallback(&html).as_deref(),
+      Some(format!("{}:cas-as=1&un=xyz@email.com&token=very_long_string", GP_CALLBACK_SCHEME).as_str())
     );
   }
 

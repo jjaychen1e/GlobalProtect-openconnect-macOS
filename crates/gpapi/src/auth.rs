@@ -5,7 +5,7 @@ use log::{info, warn};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::{error::AuthDataParseError, utils::base64::decode_to_string};
+use crate::{error::AuthDataParseError, utils::base64::decode_to_string, GP_CALLBACK_SCHEME};
 
 pub type AuthDataParseResult = anyhow::Result<SamlAuthData, AuthDataParseError>;
 
@@ -83,10 +83,11 @@ impl SamlAuthData {
   }
 
   pub fn from_gpcallback(data: &str) -> anyhow::Result<SamlAuthData, AuthDataParseError> {
-    let auth_data = data.trim_start_matches("globalprotectcallback:");
+    let scheme_prefix = format!("{}:", GP_CALLBACK_SCHEME);
+    let auth_data = data.trim_start_matches(&scheme_prefix);
 
     if auth_data.starts_with("cas-as") {
-      info!("Got CAS auth data from globalprotectcallback");
+      info!("Got CAS auth data from {}", GP_CALLBACK_SCHEME);
 
       // Decode the auth data and use the original value if decoding fails
       let auth_data = urlencoding::decode(auth_data).unwrap_or_else(|err| {
@@ -138,9 +139,9 @@ mod tests {
 
   #[test]
   fn auth_data_from_gpcallback_cas() {
-    let auth_data = "globalprotectcallback:cas-as=1&un=xyz@email.com&token=very_long_string";
+    let auth_data = format!("{}:cas-as=1&un=xyz@email.com&token=very_long_string", GP_CALLBACK_SCHEME);
 
-    let auth_data = SamlAuthData::from_gpcallback(auth_data).unwrap();
+    let auth_data = SamlAuthData::from_gpcallback(&auth_data).unwrap();
 
     assert_eq!(auth_data.username(), "xyz@email.com");
     assert_eq!(auth_data.token(), Some("very_long_string"));
@@ -148,9 +149,9 @@ mod tests {
 
   #[test]
   fn auth_data_from_gpcallback_cas_urlencoded() {
-    let auth_data = "globalprotectcallback:cas-as%3D1%26un%3Dxyz%40email.com%26token%3Dvery_long_string";
+    let auth_data = format!("{}:cas-as%3D1%26un%3Dxyz%40email.com%26token%3Dvery_long_string", GP_CALLBACK_SCHEME);
 
-    let auth_data = SamlAuthData::from_gpcallback(auth_data).unwrap();
+    let auth_data = SamlAuthData::from_gpcallback(&auth_data).unwrap();
 
     assert_eq!(auth_data.username(), "xyz@email.com");
     assert_eq!(auth_data.token(), Some("very_long_string"));

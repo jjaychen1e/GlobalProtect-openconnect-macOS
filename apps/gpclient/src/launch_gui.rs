@@ -40,7 +40,7 @@ impl<'a> LaunchGuiHandler<'a> {
     let auth_data = self.args.auth_data.as_deref().unwrap_or_default();
     if !auth_data.is_empty() {
       info!("Received auth callback data");
-      // Process the authentication data, its format is `globalprotectcallback:<data>`
+      // Process the authentication data, its format is `globalprotectcallback1:<data>`
       return feed_auth_data(auth_data).await;
     }
 

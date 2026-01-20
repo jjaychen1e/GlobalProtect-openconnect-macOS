@@ -154,6 +154,17 @@ pub async fn retrieve_config(portal: &str, cred: &Credential, gp_params: &GpPara
     .unwrap_or_default();
   let config_digest = root.descendant_text("config-digest");
 
+  // Log cookie lifetime configuration if available
+  if let Some(lifetime_days) = root
+    .find_descendant("authentication-override")
+    .and_then(|node| node.find_descendant("cookie-lifetime"))
+    .and_then(|node| node.descendant_text("lifetime-in-days"))
+  {
+    info!("Portal cookie lifetime configured: {} days", lifetime_days);
+  } else {
+    info!("No cookie lifetime configuration found in portal config");
+  }
+
   if gateways.is_empty() {
     gateways.push(Gateway::new(server.to_string(), server.to_string()));
   }

@@ -19,7 +19,7 @@ pub(crate) const GP_AUTH_BINARY: &str = "/usr/local/bin/gpauth";
 
 2. Execute `./install-macos-url-handler.sh`
 
-This is a script that will install the URL handler for the `globalprotectcallback` URL scheme.
+This is a script that will install the URL handler for the `globalprotectcallback1` URL scheme.
 
 The script is written by AI, run with caution.
 

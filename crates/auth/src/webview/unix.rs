@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::bail;
-use gpapi::utils::redact::redact_uri;
+use gpapi::{utils::redact::redact_uri, GP_CALLBACK_SCHEME};
 use log::warn;
 use tauri::webview::PlatformWebview;
 use webkit2gtk::{
@@ -94,7 +94,8 @@ impl PlatformWebviewOnResponse for PlatformWebview {
 
     wv.connect_load_failed(move |_wv, _event, uri, err| {
       let redacted_uri = redact_uri(uri);
-      if !uri.starts_with("globalprotectcallback:") {
+      let scheme_prefix = format!("{}:", GP_CALLBACK_SCHEME);
+      if !uri.starts_with(&scheme_prefix) {
         warn!("Failed to load uri: {} with error: {}", redacted_uri, err);
       }
       // NOTE: Don't send error here, since load_changed event will be triggered after this

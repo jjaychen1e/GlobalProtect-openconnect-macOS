@@ -14,7 +14,7 @@ NC='\033[0m' # No Color
 APP_NAME="GlobalProtectURLHandler"
 APP_PATH="/Applications/${APP_NAME}.app"
 GPCLIENT_PATH="/usr/local/bin/gpclient"
-URL_SCHEME="globalprotectcallback"
+URL_SCHEME="globalprotectcallback1"
 TEMP_SCRIPT="/tmp/gpclient-url-handler.applescript"
 
 echo -e "${GREEN}GlobalProtect URL Handler Installer for macOS${NC}"
@@ -49,7 +49,7 @@ fi
 echo "Creating AppleScript handler..."
 cat > "$TEMP_SCRIPT" << EOF
 -- GlobalProtect URL Handler
--- This script handles globalprotectcallback:// URLs and passes them to gpclient
+-- This script handles globalprotectcallback1:// URLs and passes them to gpclient
 
 on open location urlString
     -- Log the received URL for debugging
@@ -88,7 +88,7 @@ end open location
 
 -- Handle if the app is launched without a URL
 on run
-    display dialog "This application handles globalprotectcallback:// URLs. It should not be launched directly." buttons {"OK"} default button "OK" with icon note
+    display dialog "This application handles globalprotectcallback1:// URLs. It should not be launched directly." buttons {"OK"} default button "OK" with icon note
     quit
 end run
 EOF
@@ -173,5 +173,5 @@ echo -e "Log file: ${YELLOW}/tmp/gpclient-url-handler.log${NC}"
 echo -e "To uninstall, run: ${YELLOW}sudo $UNINSTALL_SCRIPT${NC}"
 echo -e "\n${YELLOW}Note:${NC} You may need to log out and back in for the URL handler to be fully recognized."
 echo -e "\nTo test the handler, you can run:"
-echo -e "  ${GREEN}open 'globalprotectcallback:test'${NC}"
+echo -e "  ${GREEN}open 'globalprotectcallback1:test'${NC}"
 echo -e "\nThis should create a log entry in /tmp/gpclient-url-handler.log"
