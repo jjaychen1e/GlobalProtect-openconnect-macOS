@@ -23,7 +23,7 @@ This is a script that will install the URL handler for the `globalprotectcallbac
 
 The script is written by AI, run with caution.
 
-3. Build: `cargo build -p gpclient -p gpapi`
+3. Build: `cargo build --release -p gpclient -p gpauth`
 
 4. Copy build binaries to `/usr/local/bin/`:
 
