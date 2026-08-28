@@ -1,13 +1,14 @@
 use anyhow::bail;
-use gpapi::{auth::SamlAuthData, error::AuthDataParseError, GP_CALLBACK_SCHEME};
+use common::constants::GP_CALLBACK_SCHEME;
+use gpapi::{auth::SamlAuthData, error::AuthDataParseError};
 use log::{error, info};
 use regex::Regex;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
 pub(crate) enum AuthDataLocation {
-  #[cfg(not(target_os = "macos"))]
+  #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
   Headers,
   Body,
 }
@@ -15,7 +16,7 @@ pub(crate) enum AuthDataLocation {
 #[derive(Debug)]
 pub(crate) enum AuthError {
   /// Failed to load page due to TLS error
-  #[cfg(not(target_os = "macos"))]
+  #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
   TlsError,
   /// 1. Found auth data in headers/body but it's invalid
   /// 2. Loaded an empty page, failed to load page. etc.
@@ -34,7 +35,7 @@ impl AuthError {
   }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
 impl AuthError {
   pub fn not_found_in_headers() -> Self {
     Self::NotFound(AuthDataLocation::Headers)
@@ -155,7 +156,7 @@ impl AuthMessenger {
     }
   }
 
-  #[cfg(not(target_os = "macos"))]
+  #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
   pub fn read_from_response(&self, auth_response: &impl super::webview_auth::GetHeader) {
     use log::warn;
 
@@ -221,7 +222,13 @@ mod tests {
 
     assert_eq!(
       extract_gpcallback(&html).as_deref(),
-      Some(format!("{}:cas-as=1&un=xyz@email.com&token=very_long_string", GP_CALLBACK_SCHEME).as_str())
+      Some(
+        format!(
+          "{}:cas-as=1&un=xyz@email.com&token=very_long_string",
+          GP_CALLBACK_SCHEME
+        )
+        .as_str()
+      )
     );
   }
 

@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-use crate::{gateway::Gateway, gp_params::ClientOs};
+use crate::{
+  gateway::Gateway,
+  os_profile::{ClientOs, OsProfile},
+};
 
 use super::vpn_state::ConnectInfo;
 
@@ -27,21 +30,34 @@ impl LaunchGuiRequest {
   }
 }
 
-#[derive(Debug, Deserialize, Serialize, Type)]
+#[derive(Debug, Deserialize, Serialize, Type, Clone)]
 pub struct ConnectArgs {
   cookie: String,
   vpnc_script: Option<String>,
+
   user_agent: Option<String>,
   os: Option<ClientOs>,
+  os_version: Option<String>,
+  client_version: Option<String>,
+  host_id: Option<String>,
+
   certificate: Option<String>,
   sslkey: Option<String>,
   key_password: Option<String>,
+
+  hip: bool,
   csd_uid: u32,
   csd_wrapper: Option<String>,
+
   reconnect_timeout: u32,
   mtu: u32,
   disable_ipv6: bool,
   no_dtls: bool,
+  local_hostname: Option<String>,
+  force_dpd: u32,
+  no_xmlpost: bool,
+  #[serde(rename = "allowExtendSession")]
+  allow_extend_session: bool,
 }
 
 impl ConnectArgs {
@@ -51,15 +67,23 @@ impl ConnectArgs {
       vpnc_script: None,
       user_agent: None,
       os: None,
+      os_version: None,
+      client_version: None,
+      host_id: None,
       certificate: None,
       sslkey: None,
       key_password: None,
+      hip: false,
       csd_uid: 0,
       csd_wrapper: None,
       reconnect_timeout: 300,
       mtu: 0,
       disable_ipv6: false,
       no_dtls: false,
+      local_hostname: None,
+      force_dpd: 0,
+      no_xmlpost: false,
+      allow_extend_session: false,
     }
   }
 
@@ -79,6 +103,22 @@ impl ConnectArgs {
     self.os.as_ref().map(|os| os.to_openconnect_os().to_string())
   }
 
+  pub fn os(&self) -> Option<ClientOs> {
+    self.os.clone()
+  }
+
+  pub fn os_version(&self) -> Option<String> {
+    self.os_version.clone()
+  }
+
+  pub fn client_version(&self) -> Option<String> {
+    self.client_version.clone()
+  }
+
+  pub fn host_id(&self) -> Option<String> {
+    self.host_id.clone()
+  }
+
   pub fn certificate(&self) -> Option<String> {
     self.certificate.clone()
   }
@@ -89,6 +129,10 @@ impl ConnectArgs {
 
   pub fn key_password(&self) -> Option<String> {
     self.key_password.clone()
+  }
+
+  pub fn hip(&self) -> bool {
+    self.hip
   }
 
   pub fn csd_uid(&self) -> u32 {
@@ -114,9 +158,25 @@ impl ConnectArgs {
   pub fn no_dtls(&self) -> bool {
     self.no_dtls
   }
+
+  pub fn local_hostname(&self) -> Option<String> {
+    self.local_hostname.clone()
+  }
+
+  pub fn force_dpd(&self) -> u32 {
+    self.force_dpd
+  }
+
+  pub fn no_xmlpost(&self) -> bool {
+    self.no_xmlpost
+  }
+
+  pub fn allow_extend_session(&self) -> bool {
+    self.allow_extend_session
+  }
 }
 
-#[derive(Debug, Deserialize, Serialize, Type)]
+#[derive(Debug, Deserialize, Serialize, Type, Clone)]
 pub struct ConnectRequest {
   info: ConnectInfo,
   args: ConnectArgs,
@@ -135,6 +195,11 @@ impl ConnectRequest {
     self
   }
 
+  pub fn with_hip(mut self, hip: bool) -> Self {
+    self.args.hip = hip;
+    self
+  }
+
   pub fn with_csd_uid(mut self, csd_uid: u32) -> Self {
     self.args.csd_uid = csd_uid;
     self
@@ -145,13 +210,12 @@ impl ConnectRequest {
     self
   }
 
-  pub fn with_user_agent<T: Into<Option<String>>>(mut self, user_agent: T) -> Self {
-    self.args.user_agent = user_agent.into();
-    self
-  }
-
-  pub fn with_os<T: Into<Option<ClientOs>>>(mut self, os: T) -> Self {
-    self.args.os = os.into();
+  pub fn with_os_profile(mut self, profile: &OsProfile) -> Self {
+    self.args.os = Some(profile.client_os());
+    self.args.os_version = Some(profile.os_version().to_string());
+    self.args.client_version = Some(profile.client_version().to_string());
+    self.args.host_id = Some(profile.host_identity().host_id().to_string());
+    self.args.user_agent = Some(profile.user_agent().to_string());
     self
   }
 
@@ -190,6 +254,26 @@ impl ConnectRequest {
     self
   }
 
+  pub fn with_local_hostname<T: Into<Option<String>>>(mut self, local_hostname: T) -> Self {
+    self.args.local_hostname = local_hostname.into();
+    self
+  }
+
+  pub fn with_force_dpd(mut self, force_dpd: u32) -> Self {
+    self.args.force_dpd = force_dpd;
+    self
+  }
+
+  pub fn with_no_xmlpost(mut self, no_xmlpost: bool) -> Self {
+    self.args.no_xmlpost = no_xmlpost;
+    self
+  }
+
+  pub fn with_allow_extend_session(mut self, allow_extend_session: bool) -> Self {
+    self.args.allow_extend_session = allow_extend_session;
+    self
+  }
+
   pub fn gateway(&self) -> &Gateway {
     self.info.gateway()
   }
@@ -221,4 +305,48 @@ pub enum WsRequest {
 pub struct UpdateGuiRequest {
   pub path: String,
   pub checksum: String,
+}
+
+#[cfg(test)]
+mod tests {
+  use serde_json::json;
+
+  use super::*;
+  use crate::os_profile::OsProfileBuilder;
+
+  fn test_connect_info() -> ConnectInfo {
+    let gateway = Gateway::new("Gateway".to_string(), "vpn.example.com".to_string());
+    ConnectInfo::new("portal.example.com".to_string(), gateway.clone(), vec![gateway])
+  }
+
+  #[test]
+  fn connect_request_serializes_allow_extend_session() {
+    let gateway = Gateway::new("Gateway".to_string(), "vpn.example.com".to_string());
+    let info = ConnectInfo::new("portal.example.com".to_string(), gateway.clone(), vec![gateway]);
+    let req = ConnectRequest::new(info, "authcookie=AUTH".to_string()).with_allow_extend_session(true);
+    let value = serde_json::to_value(req).unwrap();
+
+    assert_eq!(value["args"]["allowExtendSession"], json!(true));
+  }
+
+  #[test]
+  fn with_os_profile_sets_user_agent_from_profile() {
+    let profile = OsProfileBuilder::new(ClientOs::Linux).client_version("6.0.0").build();
+
+    let req = ConnectRequest::new(test_connect_info(), "cookie".to_string()).with_os_profile(&profile);
+
+    assert_eq!(req.args().user_agent(), Some(profile.user_agent().to_string()));
+  }
+
+  #[test]
+  fn with_os_profile_sets_host_id_from_profile_runtime_identity() {
+    let profile = OsProfileBuilder::new(ClientOs::Linux).build();
+
+    let req = ConnectRequest::new(test_connect_info(), "cookie".to_string()).with_os_profile(&profile);
+
+    assert_eq!(
+      req.args().host_id(),
+      Some(profile.host_identity().host_id().to_string())
+    );
+  }
 }

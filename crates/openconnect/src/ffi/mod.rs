@@ -1,7 +1,8 @@
 use crate::Vpn;
 use log::{debug, info, trace, warn};
-use std::ffi::{c_char, c_int, c_void};
+use std::ffi::{c_char, c_int, c_long, c_void};
 
+/// ConnectOptions struct for FFI, the field names and order must match the C definition.
 #[repr(C)]
 #[derive(Debug)]
 pub(crate) struct ConnectOptions {
@@ -9,11 +10,18 @@ pub(crate) struct ConnectOptions {
 
   pub server: *const c_char,
   pub cookie: *const c_char,
+
   pub user_agent: *const c_char,
+  pub os: *const c_char,
+  pub os_version: *const c_char,
+  pub client_version: *const c_char,
+  pub host_id: *const c_char,
+  pub local_hostname: *const c_char,
 
   pub script: *const c_char,
   pub interface: *const c_char,
-  pub os: *const c_char,
+  pub script_tun: u32,
+
   pub certificate: *const c_char,
   pub sslkey: *const c_char,
   pub key_password: *const c_char,
@@ -28,12 +36,26 @@ pub(crate) struct ConnectOptions {
   pub no_dtls: u32,
 
   pub dpd_interval: u32,
+  pub no_xmlpost: u32,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub(crate) struct VpnSessionInfoRaw {
+  pub auth_expiration: c_long,
+  pub lifetime_secs: c_int,
+  pub user_expires: c_long,
+  pub lifetime_warning_prior: c_int,
+  pub lifetime_warning_message: *const c_char,
 }
 
 #[link(name = "vpn")]
-extern "C" {
+unsafe extern "C" {
   #[link_name = "vpn_connect"]
-  fn vpn_connect(options: *const ConnectOptions, callback: extern "C" fn(i32, *mut c_void)) -> c_int;
+  fn vpn_connect(
+    options: *const ConnectOptions,
+    callback: extern "C" fn(i32, *const VpnSessionInfoRaw, *mut c_void),
+  ) -> c_int;
 
   #[link_name = "vpn_disconnect"]
   fn vpn_disconnect();
@@ -47,16 +69,16 @@ pub(crate) fn disconnect() {
   unsafe { vpn_disconnect() }
 }
 
-#[no_mangle]
-extern "C" fn on_vpn_connected(pipe_fd: i32, vpn: *mut c_void) {
+#[unsafe(no_mangle)]
+extern "C" fn on_vpn_connected(pipe_fd: i32, session_info: *const VpnSessionInfoRaw, vpn: *mut c_void) {
   let vpn = unsafe { &*(vpn as *const Vpn) };
-  vpn.on_connected(pipe_fd);
+  vpn.on_connected(pipe_fd, crate::vpn::session_info_from_raw(session_info));
 }
 
 // Logger used in the C code.
 // level: 0 = error, 1 = info, 2 = debug, 3 = trace
 // map the error level log in openconnect to the warning level
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn vpn_log(level: i32, message: *const c_char) {
   let message = unsafe { std::ffi::CStr::from_ptr(message) };
   let message = message.to_str().unwrap_or("Invalid log message");

@@ -5,10 +5,11 @@ use std::{
 };
 
 use anyhow::bail;
+use common::binary_paths;
 use log::info;
 use tokio::{io::AsyncWriteExt, process::Command};
 
-use crate::{process::gui_helper_launcher::GuiHelperLauncher, utils::base64, GP_GUI_BINARY};
+use crate::{process::gui_helper_launcher::GuiHelperLauncher, utils::base64};
 
 use super::command_traits::CommandExt;
 
@@ -24,7 +25,7 @@ impl<'a> GuiLauncher<'a> {
   pub fn new(version: &'a str, api_key: &'a [u8]) -> Self {
     Self {
       version,
-      program: GP_GUI_BINARY.into(),
+      program: binary_paths::gpgui(),
       api_key,
       minimized: false,
       envs: None,
@@ -68,7 +69,12 @@ impl<'a> GuiLauncher<'a> {
 
     info!("Launching gpgui");
     let mut non_root_cmd = cmd.into_non_root()?;
-    let mut child = non_root_cmd.kill_on_drop(true).stdin(Stdio::piped()).spawn()?;
+    let child = non_root_cmd.kill_on_drop(true).stdin(Stdio::piped()).spawn();
+    let mut child = match child {
+      Ok(child) => child,
+      Err(err) => bail!("Failed to spawn {}: {}", self.program.display(), err),
+    };
+
     let Some(mut stdin) = child.stdin.take() else {
       bail!("Failed to open stdin");
     };

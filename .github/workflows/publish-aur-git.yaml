@@ -1,0 +1,175 @@
+name: Publish AUR git package
+
+on:
+  workflow_dispatch:
+    inputs:
+      build-package:
+        type: boolean
+        description: "Build the package before publishing"
+        required: true
+        default: true
+      publish:
+        type: boolean
+        description: "Push PKGBUILD, .SRCINFO, and gp.install to AUR"
+        required: true
+        default: true
+  push:
+    branches:
+      - main
+    paths:
+      - packaging/aur/globalprotect-openconnect-git/**
+      - .github/workflows/publish-aur-git.yaml
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate AUR package
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    defaults:
+      run:
+        shell: bash
+    env:
+      AUR_PACKAGE_DIR: packaging/aur/globalprotect-openconnect-git
+    steps:
+      - name: Install checkout tools
+        run: pacman -Syu --noconfirm --needed git openssh
+
+      - name: Checkout GlobalProtect-openconnect
+        uses: actions/checkout@v6
+
+      - name: Install build tools
+        run: |
+          pacman -Syu --noconfirm --needed \
+            appmenu-gtk-module \
+            cargo \
+            curl \
+            desktop-file-utils \
+            file \
+            git \
+            libappindicator-gtk3 \
+            libsecret \
+            libxml2 \
+            namcap \
+            openconnect \
+            openssl \
+            pkgconf \
+            librsvg \
+            shared-mime-info \
+            vpnc \
+            wget \
+            webkit2gtk-4.1
+
+      - name: Save committed .SRCINFO
+        if: ${{ github.event_name == 'push' }}
+        run: cp "$AUR_PACKAGE_DIR/.SRCINFO" /tmp/committed.SRCINFO
+
+      - name: Prepare build user
+        run: |
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      - name: Refresh VCS package version
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          cd "$AUR_PACKAGE_DIR"
+          runuser -u builder -- makepkg --nobuild --noconfirm --cleanbuild
+
+      - name: Regenerate .SRCINFO
+        run: |
+          cd "$AUR_PACKAGE_DIR"
+          runuser -u builder -- makepkg --printsrcinfo > .SRCINFO
+
+      - name: Check committed .SRCINFO
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          cmp -s /tmp/committed.SRCINFO "$AUR_PACKAGE_DIR/.SRCINFO" || {
+            diff -u /tmp/committed.SRCINFO "$AUR_PACKAGE_DIR/.SRCINFO"
+            echo ".SRCINFO is out of date. Regenerate it with makepkg --printsrcinfo." >&2
+            exit 1
+          }
+
+      - name: Run namcap
+        run: |
+          cd "$AUR_PACKAGE_DIR"
+          runuser -u builder -- namcap PKGBUILD
+
+      - name: Build package
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs['build-package'] }}
+        run: |
+          cd "$AUR_PACKAGE_DIR"
+          runuser -u builder -- makepkg --noconfirm --clean --cleanbuild
+
+      - name: Upload AUR package metadata
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: aur-package-metadata
+          path: |
+            ${{ env.AUR_PACKAGE_DIR }}/PKGBUILD
+            ${{ env.AUR_PACKAGE_DIR }}/.SRCINFO
+            ${{ env.AUR_PACKAGE_DIR }}/gp.install
+          if-no-files-found: error
+          include-hidden-files: true
+          overwrite: true
+
+  publish:
+    name: Publish to AUR
+    needs: validate
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    defaults:
+      run:
+        shell: bash
+    env:
+      AUR_PACKAGE_DIR: /tmp/aur-package
+      AUR_REPO: ssh://aur@aur.archlinux.org/globalprotect-openconnect-git.git
+    steps:
+      - name: Install publish tools
+        run: pacman -Syu --noconfirm --needed git openssh
+
+      - name: Download AUR package metadata
+        uses: actions/download-artifact@v8
+        with:
+          name: aur-package-metadata
+          path: ${{ env.AUR_PACKAGE_DIR }}
+
+      - name: Configure SSH
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$AUR_SSH_PRIVATE_KEY" ]]; then
+            echo "AUR_SSH_PRIVATE_KEY is required to publish to AUR" >&2
+            exit 1
+          fi
+
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan -t rsa,ecdsa,ed25519 aur.archlinux.org > ~/.ssh/known_hosts
+
+      - name: Publish to AUR
+        env:
+          GIT_SSH_COMMAND: ssh -i /github/home/.ssh/aur -o UserKnownHostsFile=/github/home/.ssh/known_hosts -o StrictHostKeyChecking=yes
+        run: |
+          workdir="$(mktemp -d)"
+          git clone "$AUR_REPO" "$workdir/aur"
+
+          cp "$AUR_PACKAGE_DIR"/PKGBUILD "$workdir/aur/PKGBUILD"
+          cp "$AUR_PACKAGE_DIR"/.SRCINFO "$workdir/aur/.SRCINFO"
+          cp "$AUR_PACKAGE_DIR"/gp.install "$workdir/aur/gp.install"
+
+          cd "$workdir/aur"
+          if git diff --quiet; then
+            echo "AUR package is already up to date"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add PKGBUILD .SRCINFO gp.install
+          git commit -m "Update globalprotect-openconnect-git"
+          git push origin master

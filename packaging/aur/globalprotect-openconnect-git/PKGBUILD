@@ -1,0 +1,52 @@
+# Maintainer: Kevin Yue <k3vinyue@gmail.com>
+
+_pkgname_prefix=globalprotect-openconnect
+pkgname="${_pkgname_prefix}-git"
+pkgver=2.5.1.r1.g24f9bbb
+pkgrel=2
+pkgdesc="A GUI client for GlobalProtect VPN, based on OpenConnect, supports the SSO authentication method."
+arch=(x86_64 aarch64)
+url="https://github.com/yuezk/GlobalProtect-openconnect"
+license=('GPL3')
+
+makedepends=(git pkg-config 'openconnect>=8.20' webkit2gtk-4.1 curl wget file openssl appmenu-gtk-module libappindicator-gtk3 librsvg libsecret cargo)
+depends=(vpnc openssl webkit2gtk-4.1 libappindicator-gtk3 libsecret libxml2 shared-mime-info desktop-file-utils)
+optdepends=('wmctrl: for window management')
+
+conflicts=('globalprotect-openconnect')
+provides=('globalprotect-openconnect' 'gpclient' 'gpservice' 'gpauth' 'gpgui')
+
+install=gp.install
+
+source=("${_pkgname_prefix}::git+https://github.com/yuezk/GlobalProtect-openconnect.git#branch=main")
+
+sha256sums=("SKIP")
+
+options=('!strip')
+
+pkgver() {
+  cd "${_pkgname_prefix}"
+
+  git describe --long --tags | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+}
+
+prepare() {
+  cd "${_pkgname_prefix}"
+  git submodule update --init --recursive
+
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  # Must unset the CFLAGS, otherwise the build fails on linking openssl, don't know why
+  unset CFLAGS
+
+  cd "${_pkgname_prefix}"
+  cargo build --frozen --release
+}
+
+package() {
+  cd "${_pkgname_prefix}"
+
+  DESTDIR="$pkgdir" make install
+}

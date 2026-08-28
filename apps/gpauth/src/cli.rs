@@ -1,17 +1,25 @@
-use auth::{auth_prelogin, BrowserAuthenticator};
+use auth::{BrowserAuthenticator, auth_prelogin};
 use clap::Parser;
 use gpapi::{
   auth::{SamlAuthData, SamlAuthResult},
-  clap::{args::Os, handle_error, Args, InfoLevelVerbosity},
-  gp_params::{ClientOs, GpParams},
+  clap::{Args, InfoLevelVerbosity, args::Os, handle_error},
+  gp_params::GpParams,
+  log_format::{LogFormat, write_json_record},
+  os_profile::{ClientOs, OsProfile},
   utils::{normalize_server, openssl},
-  GP_USER_AGENT,
 };
 use log::info;
 use serde_json::json;
 use tempfile::NamedTempFile;
 
-const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", compile_time::date_str!(), ")");
+const VERSION: &str = concat!(
+  env!("CARGO_PKG_VERSION"),
+  " (",
+  env!("GPAUTH_GIT_COMMIT"),
+  " ",
+  compile_time::date_str!(),
+  ")"
+);
 
 #[derive(Parser)]
 #[command(
@@ -41,14 +49,27 @@ struct Cli {
   #[arg(long, help = "The SAML authentication request")]
   saml_request: Option<String>,
 
-  #[arg(long, default_value = GP_USER_AGENT, help = "The user agent to use")]
-  user_agent: String,
-
-  #[arg(long, default_value = "Linux")]
+  #[arg(long, value_enum, default_value_t = Os::default())]
   os: Os,
 
-  #[arg(long)]
-  os_version: Option<String>,
+  #[arg(long, help = "Use this runtime host ID when building the OS profile")]
+  host_id: Option<String>,
+
+  #[arg(long, help = "Override the GlobalProtect client version reported to the server")]
+  client_version: Option<String>,
+
+  #[arg(
+    short,
+    long,
+    help = "Use SSL client certificate file in pkcs#8 (.pem) or pkcs#12 (.p12, .pfx) format"
+  )]
+  certificate: Option<String>,
+
+  #[arg(short = 'k', long, help = "Use SSL private key file in pkcs#8 (.pem) format")]
+  sslkey: Option<String>,
+
+  #[arg(short = 'p', long, help = "The key passphrase of the private key")]
+  key_password: Option<String>,
 
   #[arg(long, help = "Get around the OpenSSL `unsafe legacy renegotiation` error")]
   fix_openssl: bool,
@@ -56,13 +77,23 @@ struct Cli {
   #[arg(long, help = "Ignore TLS errors")]
   ignore_tls_errors: bool,
 
+  #[arg(
+    long,
+    value_enum,
+    default_value_t = LogFormat::Text,
+    help = "Log output format. JSON is intended for non-interactive consumers; interactive prompts remain text."
+  )]
+  log_format: LogFormat,
+
   #[cfg(feature = "webview-auth")]
   #[arg(long, help = "Use the default browser for authentication")]
   default_browser: bool,
 
   #[arg(
     long,
-    help = "The browser to use for authentication, e.g., `default`, `firefox`, `chrome`, `chromium`, or the path to the browser executable"
+    help = "Use external browser authentication. With no value, auto-select Chrome, Firefox, then system default. Use `default` for the system default browser.",
+    default_missing_value = "auto",
+    num_args=0..=1
   )]
   browser: Option<String>,
 
@@ -85,6 +116,10 @@ impl Args for Cli {
 
   fn ignore_tls_errors(&self) -> bool {
     self.ignore_tls_errors
+  }
+
+  fn log_format(&self) -> LogFormat {
+    self.log_format
   }
 }
 
@@ -112,10 +147,14 @@ impl Cli {
 
     let server = normalize_server(&self.server)?;
     let gp_params = self.build_gp_params();
+    info!(
+      "gpauth auth host-id: {}",
+      gp_params.os_profile().host_identity().host_id()
+    );
 
     let auth_request = match self.saml_request.as_deref() {
       Some(auth_request) => auth_request.to_string(),
-      None => auth_prelogin(&server, &gp_params).await?,
+      None => auth_prelogin(&server, &gp_params, self.external_browser_requested(), self.gateway).await?,
     };
 
     #[cfg(feature = "webview-auth")]
@@ -128,10 +167,11 @@ impl Cli {
     let browser = self.browser.as_deref().or(Some("default"));
 
     if let Some(browser) = browser {
+      let auth_host_id = gp_params.os_profile().host_identity().host_id().to_string();
       let authenticator = BrowserAuthenticator::new(&auth_request, browser);
       let auth_result = authenticator.authenticate().await;
 
-      print_auth_result(auth_result);
+      print_auth_result(auth_result, Some(&auth_host_id));
 
       // explicitly drop openssl_conf to avoid the unused variable warning
       drop(openssl_conf);
@@ -145,28 +185,56 @@ impl Cli {
   }
 
   fn build_gp_params(&self) -> GpParams {
-    let gp_params = GpParams::builder()
-      .user_agent(&self.user_agent)
-      .client_os(ClientOs::from(&self.os))
-      .os_version(self.os_version.clone())
+    GpParams::builder(self.build_os_profile())
       .ignore_tls_errors(self.ignore_tls_errors)
+      .certificate(self.certificate.clone())
+      .sslkey(self.sslkey.clone())
+      .key_password(self.key_password.clone())
       .is_gateway(self.gateway)
-      .build();
+      .build()
+  }
 
-    gp_params
+  fn build_os_profile(&self) -> OsProfile {
+    let mut builder = OsProfile::builder(ClientOs::from(self.os));
+    if let Some(host_id) = self.host_id.as_deref() {
+      builder = builder.host_id_override(host_id);
+    }
+    if let Some(client_version) = self.client_version.as_deref() {
+      builder = builder.client_version(client_version);
+    }
+    builder.build()
+  }
+
+  fn external_browser_requested(&self) -> bool {
+    #[cfg(feature = "webview-auth")]
+    {
+      self.default_browser || self.browser.is_some()
+    }
+
+    #[cfg(not(feature = "webview-auth"))]
+    {
+      true
+    }
   }
 }
 
-fn init_logger(cli: &Cli) {
-  env_logger::builder()
-    .filter_level(cli.verbose.log_level_filter())
-    .init();
+fn build_logger(cli: &Cli) -> env_logger::Builder {
+  let mut builder = env_logger::builder();
+  builder.filter_level(cli.verbose.log_level_filter());
+
+  // Text is env_logger's own format, so leave it untouched rather than
+  // reimplementing it.
+  if cli.log_format == LogFormat::Json {
+    builder.format(write_json_record);
+  }
+
+  builder
 }
 
 pub async fn run() {
   let cli = Cli::parse();
 
-  init_logger(&cli);
+  build_logger(&cli).init();
   info!("gpauth started: {}", VERSION);
 
   if let Err(err) = cli.run().await {
@@ -175,11 +243,164 @@ pub async fn run() {
   }
 }
 
-pub fn print_auth_result(auth_result: anyhow::Result<SamlAuthData>) {
+pub fn print_auth_result(auth_result: anyhow::Result<SamlAuthData>, host_id: Option<&str>) {
   let auth_result = match auth_result {
-    Ok(auth_data) => SamlAuthResult::Success(auth_data),
+    Ok(auth_data) => {
+      let auth_data = match host_id {
+        Some(host_id) => auth_data.with_host_id(host_id),
+        None => auth_data,
+      };
+      SamlAuthResult::Success(auth_data)
+    }
     Err(err) => SamlAuthResult::Failure(format!("{}", err)),
   };
 
   println!("{}", json!(auth_result));
+}
+
+#[cfg(test)]
+mod tests {
+  use std::{
+    io::Write,
+    sync::{Arc, Mutex},
+  };
+
+  use log::Log;
+
+  use super::*;
+
+  /// gpauth's own result already goes to stdout as JSON; this makes its *logs*
+  /// readable the same way, so a caller driving it does not have to parse prose
+  /// on stderr to find out why an attempt failed.
+  #[test]
+  fn log_format_defaults_to_text() {
+    let cli = Cli::try_parse_from(["gpauth", "portal.example.com"]).expect("gpauth args should parse");
+
+    assert_eq!(cli.log_format, LogFormat::Text);
+  }
+
+  #[test]
+  fn log_format_accepts_json() {
+    let cli =
+      Cli::try_parse_from(["gpauth", "portal.example.com", "--log-format", "json"]).expect("gpauth args should parse");
+
+    assert_eq!(cli.log_format, LogFormat::Json);
+  }
+
+  /// A `Write` that keeps what was written, so the logger can be driven for
+  /// real instead of asserting on how it was configured.
+  #[derive(Clone, Default)]
+  struct Captured(Arc<Mutex<Vec<u8>>>);
+
+  impl Write for Captured {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+      self.0.lock().unwrap().extend_from_slice(buf);
+      Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+      Ok(())
+    }
+  }
+
+  #[test]
+  fn json_format_emits_one_json_object_per_record() {
+    let cli =
+      Cli::try_parse_from(["gpauth", "portal.example.com", "--log-format", "json"]).expect("gpauth args should parse");
+
+    let captured = Captured::default();
+    let logger = build_logger(&cli)
+      .target(env_logger::Target::Pipe(Box::new(captured.clone())))
+      .build();
+
+    // Drive the logger directly: `init()` installs a global that a second test
+    // could not replace.
+    logger.log(
+      &log::Record::builder()
+        .level(log::Level::Info)
+        .target("gpauth")
+        .args(format_args!("authenticating against {}", "portal.example.com"))
+        .build(),
+    );
+    logger.flush();
+
+    let out = String::from_utf8(captured.0.lock().unwrap().clone()).expect("log output should be UTF-8");
+    let lines: Vec<_> = out.lines().collect();
+    assert_eq!(lines.len(), 1, "expected exactly one line, got: {out:?}");
+
+    let v: serde_json::Value = serde_json::from_str(lines[0]).unwrap_or_else(|e| panic!("not JSON: {out:?} ({e})"));
+    assert_eq!(v["level"], "INFO");
+    assert_eq!(v["target"], "gpauth");
+    assert_eq!(v["message"], "authenticating against portal.example.com");
+  }
+
+  #[test]
+  fn os_defaults_to_runtime_os() {
+    let cli = Cli::try_parse_from(["gpauth", "portal.example.com"]).expect("gpauth args should parse");
+
+    assert_eq!(cli.os, Os::default());
+  }
+
+  #[test]
+  fn host_id_arg_sets_profile_host_id_seed() {
+    let cli = Cli::try_parse_from(["gpauth", "portal.example.com", "--host-id", "host-seed"])
+      .expect("gpauth args should parse");
+    let profile = cli.build_os_profile();
+
+    assert_eq!(profile.host_identity().host_id(), "host-seed");
+  }
+
+  #[test]
+  fn browser_arg_requests_external_browser() {
+    let cli =
+      Cli::try_parse_from(["gpauth", "portal.example.com", "--browser", "firefox"]).expect("gpauth args should parse");
+
+    assert!(cli.external_browser_requested());
+  }
+
+  #[test]
+  fn browser_without_value_uses_auto_mode() {
+    let cli = Cli::try_parse_from(["gpauth", "portal.example.com", "--browser"]).expect("gpauth args should parse");
+
+    assert_eq!(cli.browser.as_deref(), Some("auto"));
+    assert!(cli.external_browser_requested());
+  }
+
+  #[test]
+  fn browser_default_keeps_system_default_mode() {
+    let cli =
+      Cli::try_parse_from(["gpauth", "portal.example.com", "--browser", "default"]).expect("gpauth args should parse");
+
+    assert_eq!(cli.browser.as_deref(), Some("default"));
+    assert!(cli.external_browser_requested());
+  }
+
+  #[test]
+  fn client_version_arg_sets_profile_client_version() {
+    let cli = Cli::try_parse_from(["gpauth", "portal.example.com", "--client-version", "legacy-client"])
+      .expect("gpauth args should parse");
+    let profile = cli.build_os_profile();
+
+    assert_eq!(profile.client_version(), "legacy-client");
+    assert!(profile.user_agent().contains("legacy-client"));
+  }
+
+  #[test]
+  fn client_certificate_args_parse() {
+    let cli = Cli::try_parse_from([
+      "gpauth",
+      "portal.example.com",
+      "--certificate",
+      "/tmp/client.pem",
+      "--sslkey",
+      "/tmp/client.key",
+      "--key-password",
+      "secret",
+    ])
+    .expect("gpauth args should parse");
+
+    assert_eq!(cli.certificate.as_deref(), Some("/tmp/client.pem"));
+    assert_eq!(cli.sslkey.as_deref(), Some("/tmp/client.key"));
+    assert_eq!(cli.key_password.as_deref(), Some("secret"));
+  }
 }

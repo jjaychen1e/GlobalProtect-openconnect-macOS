@@ -1,47 +1,55 @@
-Here is how you can run this tool in CLI mode, in macOS. Make sure you have installed openconnect, etc.
+# macOS (CLI)
 
-1. Update `crates/gpapi/src/lib.rs`
+This tree tracks upstream GlobalProtect-openconnect and keeps the SSO callback scheme `globalprotectcallback1`, so it does not collide with the official Palo Alto GlobalProtect client.
 
-Replace `/usr/bin/` with `/usr/local/bin/`:
+Do not run `make install`. That target writes to `/usr/bin` (Linux layout).
 
-```
-#[cfg(not(debug_assertions))]
-pub const GP_CLIENT_BINARY: &str = "/usr/local/bin/gpclient";
-#[cfg(not(debug_assertions))]
-pub const GP_SERVICE_BINARY: &str = "/usr/local/bin/gpservice";
-#[cfg(not(debug_assertions))]
-pub const GP_GUI_BINARY: &str = "/usr/local/bin/gpgui";
-#[cfg(not(debug_assertions))]
-pub const GP_GUI_HELPER_BINARY: &str = "/usr/local/bin/gpgui-helper";
-#[cfg(not(debug_assertions))]
-pub(crate) const GP_AUTH_BINARY: &str = "/usr/local/bin/gpauth";
-```
+## 1. Build
 
-2. Execute `./install-macos-url-handler.sh`
+```bash
+git submodule update --init --recursive
 
-This is a script that will install the URL handler for the `globalprotectcallback1` URL scheme.
+brew install rust autoconf automake libtool pkg-config libxml2 gnutls p11-kit nettle gmp lz4 gettext
 
-The script is written by AI, run with caution.
+export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig:$(brew --prefix libxml2)/lib/pkgconfig"
 
-3. Build: `cargo build --release -p gpclient -p gpauth`
-
-4. Copy build binaries to `/usr/local/bin/`:
-
-```
-sudo cp ./target/release/gpclient /usr/local/bin/
-sudo cp ./target/release/gpauth /usr/local/bin/
+cargo build --release -p gpclient -p gpauth -p gpservice
 ```
 
-5. Connect:
+## 2. Install binaries
 
-You must specify the gateway in the command unless you will get `Error: IO error: Failed to initialize input reader`. If you don't know the url of gateway, just omit the option and you will get a list of gateways before it throws the error.
+Apple Silicon Homebrew prefix is `/opt/homebrew`. Intel is `/usr/local`.
 
+```bash
+PREFIX="$(brew --prefix)"
+sudo cp target/release/gpclient target/release/gpauth target/release/gpservice "$PREFIX/bin/"
+
+sudo mkdir -p /usr/local/libexec/gpclient
+sudo cp packaging/files/usr/libexec/gpclient/vpnc-script /usr/local/libexec/gpclient/vpnc-script
+sudo cp packaging/files/usr/libexec/gpclient/hipreport.sh /usr/local/libexec/gpclient/hipreport.sh
+sudo chmod +x /usr/local/libexec/gpclient/vpnc-script /usr/local/libexec/gpclient/hipreport.sh
 ```
-gpauth <your_portal> --browser default 2>/dev/null | sudo gpclient connect <your_portal> --cookie-on-stdin --gateway <your_gateway>"
+
+`vpnc-script` and `hipreport.sh` go under `/usr/local/libexec/gpclient/` because that is the first path the client searches on every architecture.
+
+## 3. URL handler
+
+```bash
+./install-macos-url-handler.sh
 ```
 
-If you want to split the tunnel, you can add `vpn-slice` in the `-s` option (refer the doc of vpn-slice for how to install it).
+This registers `globalprotectcallback1://` and forwards the URL to `gpclient launch-gui`. Re-run the script after you move `gpclient`.
 
+## 4. Connect
+
+You must pass `--gateway` unless you want the client to list gateways and then fail with `Failed to initialize input reader`.
+
+```bash
+gpauth <your_portal> --browser default 2>/dev/null | sudo gpclient connect <your_portal> --cookie-on-stdin --gateway <your_gateway>
 ```
+
+Split tunnel with `vpn-slice`:
+
+```bash
 gpauth <your_portal> --browser default 2>/dev/null | sudo gpclient connect <your_portal> --cookie-on-stdin --gateway <your_gateway> -s "vpn-slice xxx.xxx.xxx.xxx"
 ```

@@ -8,6 +8,10 @@
 .cargo
 .build
 SNAPSHOT
+SOURCE_COMMIT
 
 # Tauri generated files
 gen
+
+# Nix files
+result

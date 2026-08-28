@@ -1,23 +1,76 @@
 use std::{
-  ffi::{c_char, CString},
+  ffi::{CStr, CString, c_char},
   fmt,
   sync::{Arc, RwLock},
 };
 
-use common::vpn_utils::{check_executable, find_vpnc_script};
 use log::info;
 
 use crate::ffi;
+use crate::vpn_utils::{check_executable, find_csd_wrapper, find_vpnc_script};
 
-type OnConnectedCallback = Arc<RwLock<Option<Box<dyn FnOnce() + 'static + Send + Sync>>>>;
+type OnConnectedCallback = Arc<RwLock<Option<Box<dyn FnOnce(VpnSessionInfo) + 'static + Send + Sync>>>>;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VpnSessionInfo {
+  pub lifetime_secs: Option<u32>,
+  pub user_expires: Option<u32>,
+  pub lifetime_warning: Option<VpnSessionWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VpnSessionWarning {
+  pub prior_secs: u32,
+  pub message: String,
+}
+
+pub(crate) fn session_info_from_raw(raw: *const ffi::VpnSessionInfoRaw) -> VpnSessionInfo {
+  if raw.is_null() {
+    return VpnSessionInfo::default();
+  }
+
+  let raw = unsafe { &*raw };
+  let warning_message =
+    unsafe { optional_c_string(raw.lifetime_warning_message) }.filter(|message| !message.is_empty());
+  let user_expires = positive_i64_to_u32(raw.user_expires).or_else(|| positive_i64_to_u32(raw.auth_expiration));
+
+  VpnSessionInfo {
+    lifetime_secs: positive_i64_to_u32(raw.lifetime_secs as i64),
+    user_expires,
+    lifetime_warning: match (positive_i64_to_u32(raw.lifetime_warning_prior as i64), warning_message) {
+      (Some(prior_secs), Some(message)) => Some(VpnSessionWarning { prior_secs, message }),
+      _ => None,
+    },
+  }
+}
+
+unsafe fn optional_c_string(value: *const c_char) -> Option<String> {
+  if value.is_null() {
+    return None;
+  }
+
+  unsafe { CStr::from_ptr(value) }.to_str().ok().map(ToOwned::to_owned)
+}
+
+fn positive_i64_to_u32(value: i64) -> Option<u32> {
+  u32::try_from(value).ok().filter(|value| *value > 0)
+}
 
 pub struct Vpn {
   server: CString,
   cookie: CString,
+
   user_agent: CString,
+  os: CString,
+  os_version: Option<CString>,
+  client_version: Option<CString>,
+  host_id: Option<CString>,
+  local_hostname: Option<CString>,
+
   script: CString,
   interface: Option<CString>,
-  os: CString,
+  script_tun: bool,
+
   certificate: Option<CString>,
   sslkey: Option<CString>,
   key_password: Option<CString>,
@@ -32,6 +85,7 @@ pub struct Vpn {
   no_dtls: bool,
 
   dpd_interval: u32,
+  no_xmlpost: bool,
 
   callback: OnConnectedCallback,
 }
@@ -41,18 +95,18 @@ impl Vpn {
     VpnBuilder::new(server, cookie)
   }
 
-  pub fn connect(&self, on_connected: impl FnOnce() + 'static + Send + Sync) -> i32 {
+  pub fn connect(&self, on_connected: impl FnOnce(VpnSessionInfo) + 'static + Send + Sync) -> i32 {
     self.callback.write().unwrap().replace(Box::new(on_connected));
     let options = self.build_connect_options();
 
     ffi::connect(&options)
   }
 
-  pub(crate) fn on_connected(&self, pipe_fd: i32) {
+  pub(crate) fn on_connected(&self, pipe_fd: i32, session_info: VpnSessionInfo) {
     info!("Connected to VPN, pipe_fd: {}", pipe_fd);
 
     if let Some(callback) = self.callback.write().unwrap().take() {
-      callback();
+      callback(session_info);
     }
   }
 
@@ -66,10 +120,17 @@ impl Vpn {
 
       server: self.server.as_ptr(),
       cookie: self.cookie.as_ptr(),
+
       user_agent: self.user_agent.as_ptr(),
+      os: self.os.as_ptr(),
+      os_version: Self::option_to_ptr(&self.os_version),
+      client_version: Self::option_to_ptr(&self.client_version),
+      host_id: Self::option_to_ptr(&self.host_id),
+      local_hostname: Self::option_to_ptr(&self.local_hostname),
+
       script: self.script.as_ptr(),
       interface: Self::option_to_ptr(&self.interface),
-      os: self.os.as_ptr(),
+      script_tun: self.script_tun as u32,
 
       certificate: Self::option_to_ptr(&self.certificate),
       sslkey: Self::option_to_ptr(&self.sslkey),
@@ -84,6 +145,7 @@ impl Vpn {
       disable_ipv6: self.disable_ipv6 as u32,
       no_dtls: self.no_dtls as u32,
       dpd_interval: self.dpd_interval,
+      no_xmlpost: self.no_xmlpost as u32,
     }
   }
 
@@ -119,14 +181,20 @@ pub struct VpnBuilder {
   cookie: String,
   script: Option<String>,
   interface: Option<String>,
+  script_tun: bool,
 
   user_agent: Option<String>,
   os: Option<String>,
+  os_version: Option<String>,
+  client_version: Option<String>,
+  host_id: Option<String>,
+  local_hostname: Option<String>,
 
   certificate: Option<String>,
   sslkey: Option<String>,
   key_password: Option<String>,
 
+  hip: bool,
   csd_uid: u32,
   csd_wrapper: Option<String>,
 
@@ -136,6 +204,7 @@ pub struct VpnBuilder {
   no_dtls: bool,
 
   dpd_interval: u32,
+  no_xmlpost: bool,
 }
 
 impl VpnBuilder {
@@ -145,14 +214,20 @@ impl VpnBuilder {
       cookie: cookie.to_string(),
       script: None,
       interface: None,
+      script_tun: false,
 
       user_agent: None,
       os: None,
+      os_version: None,
+      client_version: None,
+      host_id: None,
+      local_hostname: None,
 
       certificate: None,
       sslkey: None,
       key_password: None,
 
+      hip: false,
       csd_uid: 0,
       csd_wrapper: None,
 
@@ -161,6 +236,7 @@ impl VpnBuilder {
       disable_ipv6: false,
       no_dtls: false,
       dpd_interval: 0,
+      no_xmlpost: false,
     }
   }
 
@@ -174,6 +250,11 @@ impl VpnBuilder {
     self
   }
 
+  pub fn script_tun(mut self, script_tun: bool) -> Self {
+    self.script_tun = script_tun;
+    self
+  }
+
   pub fn user_agent<T: Into<Option<String>>>(mut self, user_agent: T) -> Self {
     self.user_agent = user_agent.into();
     self
@@ -181,6 +262,26 @@ impl VpnBuilder {
 
   pub fn os<T: Into<Option<String>>>(mut self, os: T) -> Self {
     self.os = os.into();
+    self
+  }
+
+  pub fn os_version<T: Into<Option<String>>>(mut self, os_version: T) -> Self {
+    self.os_version = os_version.into();
+    self
+  }
+
+  pub fn client_version<T: Into<Option<String>>>(mut self, client_version: T) -> Self {
+    self.client_version = client_version.into();
+    self
+  }
+
+  pub fn host_id<T: Into<Option<String>>>(mut self, host_id: T) -> Self {
+    self.host_id = host_id.into();
+    self
+  }
+
+  pub fn local_hostname<T: Into<Option<String>>>(mut self, local_hostname: T) -> Self {
+    self.local_hostname = local_hostname.into();
     self
   }
 
@@ -196,6 +297,11 @@ impl VpnBuilder {
 
   pub fn key_password<T: Into<Option<String>>>(mut self, key_password: T) -> Self {
     self.key_password = key_password.into();
+    self
+  }
+
+  pub fn hip(mut self, hip: bool) -> Self {
+    self.hip = hip;
     self
   }
 
@@ -234,18 +340,41 @@ impl VpnBuilder {
     self
   }
 
-  pub fn build(self) -> Result<Vpn, VpnError> {
-    let script = match self.script {
-      Some(script) => {
-        check_executable(&script).map_err(|e| VpnError::new(e.to_string()))?;
-        script
-      }
-      None => find_vpnc_script().ok_or_else(|| VpnError::new(String::from("Failed to find vpnc-script")))?,
-    };
+  pub fn no_xmlpost(mut self, no_xmlpost: bool) -> Self {
+    self.no_xmlpost = no_xmlpost;
+    self
+  }
 
-    if let Some(csd_wrapper) = &self.csd_wrapper {
-      check_executable(csd_wrapper).map_err(|e| VpnError::new(e.to_string()))?;
+  fn determine_script(&self) -> Result<&str, VpnError> {
+    match &self.script {
+      Some(script) => {
+        check_executable(script).map_err(|e| VpnError::new(e.to_string()))?;
+        Ok(script)
+      }
+      None => find_vpnc_script().ok_or_else(|| VpnError::new(String::from("Failed to find vpnc-script"))),
     }
+  }
+
+  fn determine_csd_wrapper(&self) -> Result<Option<&str>, VpnError> {
+    if !self.hip {
+      return Ok(None);
+    }
+
+    match &self.csd_wrapper {
+      Some(csd_wrapper) if !csd_wrapper.is_empty() => {
+        check_executable(csd_wrapper).map_err(|e| VpnError::new(e.to_string()))?;
+        Ok(Some(csd_wrapper))
+      }
+      _ => {
+        let s = find_csd_wrapper().ok_or_else(|| VpnError::new(String::from("Failed to find csd wrapper")))?;
+        Ok(Some(s))
+      }
+    }
+  }
+
+  pub fn build(self) -> Result<Vpn, VpnError> {
+    let script = self.determine_script()?.to_owned();
+    let csd_wrapper = self.determine_csd_wrapper()?.map(|s| s.to_owned());
 
     let user_agent = self.user_agent.unwrap_or_default();
     let os = self.os.unwrap_or("linux".to_string());
@@ -253,10 +382,17 @@ impl VpnBuilder {
     Ok(Vpn {
       server: Self::to_cstring(&self.server),
       cookie: Self::to_cstring(&self.cookie),
+
       user_agent: Self::to_cstring(&user_agent),
+      os: Self::to_cstring(&os),
+      os_version: self.os_version.as_deref().map(Self::to_cstring),
+      client_version: self.client_version.as_deref().map(Self::to_cstring),
+      host_id: self.host_id.as_deref().map(Self::to_cstring),
+      local_hostname: self.local_hostname.as_deref().map(Self::to_cstring),
+
       script: Self::to_cstring(&script),
       interface: self.interface.as_deref().map(Self::to_cstring),
-      os: Self::to_cstring(&os),
+      script_tun: self.script_tun,
 
       certificate: self.certificate.as_deref().map(Self::to_cstring),
       sslkey: self.sslkey.as_deref().map(Self::to_cstring),
@@ -264,13 +400,14 @@ impl VpnBuilder {
       servercert: None,
 
       csd_uid: self.csd_uid,
-      csd_wrapper: self.csd_wrapper.as_deref().map(Self::to_cstring),
+      csd_wrapper: csd_wrapper.as_deref().map(Self::to_cstring),
 
       reconnect_timeout: self.reconnect_timeout,
       mtu: self.mtu,
       disable_ipv6: self.disable_ipv6,
       no_dtls: self.no_dtls,
       dpd_interval: self.dpd_interval,
+      no_xmlpost: self.no_xmlpost,
 
       callback: Default::default(),
     })
@@ -278,5 +415,87 @@ impl VpnBuilder {
 
   fn to_cstring(value: &str) -> CString {
     CString::new(value.to_string()).expect("Failed to convert to CString")
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::ffi::CString;
+
+  #[test]
+  fn maps_session_info_from_callback_payload() {
+    let message = CString::new("Session expires soon").unwrap();
+    let raw = ffi::VpnSessionInfoRaw {
+      auth_expiration: 0,
+      lifetime_secs: 43_200,
+      user_expires: 1_776_828_409,
+      lifetime_warning_prior: 1_800,
+      lifetime_warning_message: message.as_ptr(),
+    };
+
+    let info = session_info_from_raw(&raw);
+
+    assert_eq!(info.lifetime_secs, Some(43_200));
+    assert_eq!(info.user_expires, Some(1_776_828_409));
+    assert_eq!(
+      info.lifetime_warning,
+      Some(VpnSessionWarning {
+        prior_secs: 1_800,
+        message: "Session expires soon".to_string(),
+      })
+    );
+  }
+
+  #[test]
+  fn falls_back_to_auth_expiration_when_user_expires_is_absent() {
+    let raw = ffi::VpnSessionInfoRaw {
+      auth_expiration: 1_776_828_409,
+      lifetime_secs: 0,
+      user_expires: 0,
+      lifetime_warning_prior: 0,
+      lifetime_warning_message: std::ptr::null(),
+    };
+
+    let info = session_info_from_raw(&raw);
+
+    assert_eq!(info.user_expires, Some(1_776_828_409));
+    assert_eq!(info.lifetime_secs, None);
+    assert_eq!(info.lifetime_warning, None);
+  }
+
+  #[test]
+  fn connect_options_include_host_id() {
+    let vpn = Vpn {
+      server: CString::new("gateway.example.com").unwrap(),
+      cookie: CString::new("cookie").unwrap(),
+      user_agent: CString::new("agent").unwrap(),
+      os: CString::new("linux").unwrap(),
+      os_version: None,
+      client_version: None,
+      host_id: Some(CString::new("profile-host-id").unwrap()),
+      local_hostname: None,
+      script: CString::new("/bin/true").unwrap(),
+      interface: None,
+      script_tun: false,
+      certificate: None,
+      sslkey: None,
+      key_password: None,
+      servercert: None,
+      csd_uid: 0,
+      csd_wrapper: None,
+      reconnect_timeout: 300,
+      mtu: 0,
+      disable_ipv6: false,
+      no_dtls: false,
+      dpd_interval: 0,
+      no_xmlpost: false,
+      callback: Default::default(),
+    };
+
+    let options = vpn.build_connect_options();
+
+    let host_id = unsafe { CStr::from_ptr(options.host_id) }.to_str().unwrap();
+    assert_eq!(host_id, "profile-host-id");
   }
 }

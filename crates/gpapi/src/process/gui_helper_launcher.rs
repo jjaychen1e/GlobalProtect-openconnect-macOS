@@ -1,10 +1,11 @@
 use std::{collections::HashMap, path::PathBuf, process::Stdio};
 
 use anyhow::bail;
+use common::binary_paths;
 use log::info;
 use tokio::{io::AsyncWriteExt, process::Command};
 
-use crate::{process::command_traits::CommandExt, utils, GP_GUI_HELPER_BINARY};
+use crate::{process::command_traits::CommandExt, utils};
 
 pub struct GuiHelperLauncher<'a> {
   program: PathBuf,
@@ -16,7 +17,7 @@ pub struct GuiHelperLauncher<'a> {
 impl<'a> GuiHelperLauncher<'a> {
   pub fn new(api_key: &'a [u8]) -> Self {
     Self {
-      program: GP_GUI_HELPER_BINARY.into(),
+      program: binary_paths::gpgui_helper(),
       envs: None,
       api_key,
       gui_version: None,
@@ -49,7 +50,12 @@ impl<'a> GuiHelperLauncher<'a> {
 
     info!("Launching gpgui-helper");
     let mut non_root_cmd = cmd.into_non_root()?;
-    let mut child = non_root_cmd.kill_on_drop(true).stdin(Stdio::piped()).spawn()?;
+    let child = non_root_cmd.kill_on_drop(true).stdin(Stdio::piped()).spawn();
+    let mut child = match child {
+      Ok(child) => child,
+      Err(err) => bail!("Failed to spawn {}: {}", self.program.display(), err),
+    };
+
     let Some(mut stdin) = child.stdin.take() else {
       bail!("Failed to open stdin");
     };

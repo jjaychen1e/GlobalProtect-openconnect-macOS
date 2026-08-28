@@ -1,7 +1,9 @@
 mod cli;
 mod connect;
 mod disconnect;
+mod hip;
 mod launch_gui;
+mod session;
 
 pub(crate) const GP_CLIENT_LOCK_FILE: &str = "/var/run/gpclient.lock";
 

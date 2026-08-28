@@ -1,4 +1,4 @@
-pub(crate) mod xml;
+pub mod xml;
 
 pub mod base64;
 pub mod checksum;
@@ -47,7 +47,7 @@ pub fn remove_url_scheme(s: &str) -> String {
 
 #[derive(Error, Debug)]
 #[error("GP response error: reason={reason}, status={status}, body={body}")]
-pub(crate) struct GpError {
+pub struct GpError {
   pub status: StatusCode,
   pub reason: String,
   body: String,
@@ -59,7 +59,7 @@ impl GpError {
   }
 }
 
-pub(crate) async fn parse_gp_response(res: Response) -> anyhow::Result<String, GpError> {
+pub async fn parse_gp_response(res: Response) -> anyhow::Result<String, GpError> {
   let status = res.status();
 
   if status.is_client_error() || status.is_server_error() {

@@ -1,5 +1,25 @@
 name: Build
 on:
+  workflow_dispatch:
+    inputs:
+      gp_branch:
+        description: 'GlobalProtect-openconnect branch to use for the snapshot release'
+        required: true
+        default: dev
+      gpgui_branch:
+        description: 'gpgui branch to use for the snapshot release'
+        required: true
+        default: dev
+      build_bsd:
+        description: 'Build FreeBSD/OpenBSD packages for the snapshot release'
+        required: true
+        default: false
+        type: boolean
+      build_bsd_arm64:
+        description: 'Build optional FreeBSD/OpenBSD arm64 packages for the snapshot release. Slow and disabled by default'
+        required: true
+        default: false
+        type: boolean
   push:
     paths-ignore:
       - LICENSE
@@ -8,7 +28,6 @@ on:
       - .devcontainer
     branches:
       - main
-      - dev
       - hotfix/*
       - feature/*
       - release/*
@@ -20,39 +39,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Include arm64 if ref is a tag
-  setup-matrix:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-    steps:
-      - name: Set up matrix
-        id: set-matrix
-        run: |
-          # Set the matrix to include arm64 if the ref is a tag or is the dev branch
-          if [[ "${{ github.ref }}" == "refs/tags/"* || "${{ github.ref }}" == "refs/heads/dev" ]]; then
-            echo 'matrix=[{"runner": "ubuntu-latest", "arch": "amd64"}, {"runner": "ubuntu-24.04-arm", "arch": "ubuntu-24.04-arm"}]' >> $GITHUB_OUTPUT
-          else
-            echo 'matrix=[{"runner": "ubuntu-latest", "arch": "amd64"}]' >> $GITHUB_OUTPUT
-          fi
-
   tarball:
     runs-on: ubuntu-latest
-    needs: [setup-matrix]
     steps:
-    - uses: pnpm/action-setup@v4
+    - uses: pnpm/action-setup@v5
       with:
         version: 9
     - name: Prepare workspace
       run: rm -rf source && mkdir -p source/artifacts
 
     - name: Checkout GlobalProtect-openconnect
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       with:
         token: ${{ secrets.GH_PAT }}
         repository: yuezk/GlobalProtect-openconnect
-        ref: ${{ github.ref }}
+        ref: ${{ github.event_name == 'workflow_dispatch' && inputs.gp_branch || github.ref }}
         path: source/gp
+        submodules: recursive
 
     - name: Create tarball
       run: |
@@ -67,7 +70,7 @@ jobs:
 
     - name: Generate RPM spec file
       env:
-        RELEASE_TAG: ${{ github.ref == 'refs/heads/dev' && 'snapshot' || github.ref_name }}
+        RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && 'snapshot' || github.ref_name }}
       run: |
         cd source/gp
 
@@ -78,7 +81,7 @@ jobs:
         mv -v .build/rpm/*.spec ../artifacts/
 
     - name: Upload tarball
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: artifact-source
         if-no-files-found: error
@@ -86,12 +89,12 @@ jobs:
           source/artifacts/*
 
   tarball-offline:
-    if: ${{ github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/') }}
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     needs:
     - tarball
     steps:
-    - uses: pnpm/action-setup@v4
+    - uses: pnpm/action-setup@v5
       with:
         version: 9
 
@@ -99,7 +102,7 @@ jobs:
       run: rm -rf source-offline && mkdir source-offline
 
     - name: Download tarball
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: artifact-source
         path: source-offline
@@ -120,21 +123,25 @@ jobs:
         mv -v .build/tarball/*.tar.gz ../$offline_tarball
 
     - name: Upload offline tarball
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         path: source-offline/*.offline.tar.gz
         name: artifact-source-offline
         if-no-files-found: error
 
   build-gp:
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
     needs:
-    - setup-matrix
     - tarball
     strategy:
+      fail-fast: false
       matrix:
-        # Only build gp on amd64, as the arm64 package will be built in release.yaml
-        os: [{runner: ubuntu-latest, arch: amd64}]
-        package: [deb, rpm, pkg, binary]
+        os:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: ubuntu-24.04-arm
+        package: [deb, rpm, pkg, apk, binary, ubuntu-rolling]
     runs-on: ${{ matrix.os.runner }}
     name: build-gp (${{ matrix.package }}, ${{ matrix.os.arch }})
     steps:
@@ -143,119 +150,514 @@ jobs:
         rm -rf build-gp-${{ matrix.package }}
         mkdir -p build-gp-${{ matrix.package }}
     - name: Download tarball
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: artifact-source
         path: build-gp-${{ matrix.package }}
-    - name: Docker Login
-      run: echo ${{ secrets.DOCKER_HUB_TOKEN }} | docker login -u ${{ secrets.DOCKER_HUB_USERNAME }} --password-stdin
     - name: Build ${{ matrix.package }} package in Docker
+      # LIBXML2_STATIC is needed to avoid the dynamic linking issue on different distros
       run: |
-        docker run --pull=always --rm \
+        docker run --rm \
           -e COREPACK_INTEGRITY_KEYS=0 \
-          -v $(pwd)/build-gp-${{ matrix.package }}:/${{ matrix.package }} \
+          -e LIBXML2_STATIC=1 \
+          -v $(pwd)/build-gp-${{ matrix.package }}:/workspace \
           yuezk/gpdev:${{ matrix.package }}-builder-tauri2
     - name: Install ${{ matrix.package }} package in Docker
       run: |
-        docker run --pull=always --rm \
+        docker run --rm \
           -e COREPACK_INTEGRITY_KEYS=0 \
           -e GPGUI_INSTALLED=0 \
-          -v $(pwd)/build-gp-${{ matrix.package }}:/${{ matrix.package }} \
+          -v $(pwd)/build-gp-${{ matrix.package }}:/workspace \
           yuezk/gpdev:${{ matrix.package }}-builder-tauri2 \
           bash install.sh
+    # Don't upload package for ubuntu-rolling because it's duplicate of deb package
     - name: Upload ${{ matrix.package }} package
-      uses: actions/upload-artifact@v4
+      if: ${{ matrix.package != 'ubuntu-rolling' }}
+      uses: actions/upload-artifact@v7
       with:
         name: artifact-gp-${{ matrix.package }}-${{ matrix.os.arch }}
         if-no-files-found: error
         path: |
           build-gp-${{ matrix.package }}/artifacts/*
 
-  build-gpgui:
-    needs:
-    - setup-matrix
+  build-docker-image:
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
     strategy:
+      fail-fast: false
       matrix:
-        os: ${{fromJson(needs.setup-matrix.outputs.matrix)}}
-    runs-on: ${{ matrix.os.runner }}
-    name: build-gpgui (${{ matrix.os.arch }})
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
     steps:
-    - uses: pnpm/action-setup@v4
+    - name: Prepare
+      run: |
+        platform=${{ matrix.platform }}
+        echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
+    - name: Checkout GlobalProtect-openconnect
+      uses: actions/checkout@v6
+      with:
+        token: ${{ secrets.GH_PAT }}
+        repository: yuezk/GlobalProtect-openconnect
+        ref: ${{ github.event_name == 'workflow_dispatch' && inputs.gp_branch || github.ref }}
+        submodules: recursive
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v4
+    - name: Login to Docker Hub
+      uses: docker/login-action@v4
+      with:
+        username: ${{ secrets.DOCKER_HUB_USERNAME }}
+        password: ${{ secrets.DOCKER_HUB_TOKEN }}
+    - name: Build and push by digest
+      id: build
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        file: packaging/docker/alpine/Dockerfile
+        platforms: ${{ matrix.platform }}
+        outputs: type=image,name=yuezk/globalprotect-openconnect,push-by-digest=true,name-canonical=true,push=true
+    - name: Verify CLI tools
+      env:
+        IMAGE: yuezk/globalprotect-openconnect
+        DIGEST: ${{ steps.build.outputs.digest }}
+      run: |
+        docker run --rm "$IMAGE@$DIGEST" --help
+        docker run --rm --entrypoint gpauth "$IMAGE@$DIGEST" --help
+        docker run --rm --entrypoint sh "$IMAGE@$DIGEST" -lc 'test "$(id -u gp)" = "1000" && test "$SUDO_UID" = "1000"'
+    - name: Export digest
+      run: |
+        mkdir -p /tmp/digests
+        digest="${{ steps.build.outputs.digest }}"
+        touch "/tmp/digests/${digest#sha256:}"
+    - name: Upload digest
+      uses: actions/upload-artifact@v7
+      with:
+        name: digests-${{ env.PLATFORM_PAIR }}
+        path: /tmp/digests/*
+        if-no-files-found: error
+        retention-days: 1
+
+  build-gpgui:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: ubuntu-24.04-arm
+        libc:
+          - name: glibc
+            builder: gpgui-builder-tauri2
+            artifact_suffix: ""
+          - name: musl
+            builder: gpgui-alpine-builder-tauri2
+            artifact_suffix: "-musl"
+    runs-on: ${{ matrix.os.runner }}
+    name: build-gpgui (${{ matrix.libc.name }}, ${{ matrix.os.arch }})
+    steps:
+    - uses: pnpm/action-setup@v5
       with:
         version: 9
     - name: Prepare workspace
       run: rm -rf gpgui-source && mkdir gpgui-source
     - name: Checkout GlobalProtect-openconnect
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       with:
         token: ${{ secrets.GH_PAT }}
         repository: yuezk/GlobalProtect-openconnect
-        ref: ${{ github.ref }}
+        ref: ${{ github.event_name == 'workflow_dispatch' && inputs.gp_branch || github.ref }}
         path: gpgui-source/gp
-    - name: Checkout gpgui@${{ github.ref_name }}
-      uses: actions/checkout@v4
+        submodules: recursive
+    - name: Checkout gpgui
+      uses: actions/checkout@v6
       with:
         token: ${{ secrets.GH_PAT }}
         repository: yuezk/gpgui
-        ref: ${{ github.ref_name }}
+        ref: ${{ github.event_name == 'workflow_dispatch' && inputs.gpgui_branch || github.ref_name }}
         path: gpgui-source/gpgui
     - name: Tarball
       run: |
         cd gpgui-source
         tar -czf gpgui.tar.gz gpgui gp
-    - name: Docker Login
-      run: echo ${{ secrets.DOCKER_HUB_TOKEN }} | docker login -u ${{ secrets.DOCKER_HUB_USERNAME }} --password-stdin
     - name: Build gpgui in Docker
       run: |
-        docker run --pull=always --rm \
+        docker run --rm \
           -e COREPACK_INTEGRITY_KEYS=0 \
-          -v $(pwd)/gpgui-source:/gpgui yuezk/gpdev:gpgui-builder-tauri2
+          -v $(pwd)/gpgui-source:/workspace yuezk/gpdev:${{ matrix.libc.builder }}
     - name: Install gpgui in Docker
       run: |
         cd gpgui-source
         tar -xJf *.bin.tar.xz
-        docker run --pull=always --rm \
+        docker run --rm \
           -e COREPACK_INTEGRITY_KEYS=0 \
-          -v $(pwd):/gpgui yuezk/gpdev:gpgui-builder-tauri2 \
-          bash -c "cd /gpgui/gpgui_*/ && ./gpgui --version"
+          -v $(pwd):/workspace yuezk/gpdev:${{ matrix.libc.builder }} \
+          bash -c "cd /workspace/gpgui_*/ && ./gpgui --version"
     - name: Upload gpgui
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
-        name: artifact-gpgui-${{ matrix.os.arch }}
+        name: artifact-gpgui${{ matrix.libc.artifact_suffix }}-${{ matrix.os.arch }}
         if-no-files-found: error
         path: |
           gpgui-source/*.bin.tar.xz
           gpgui-source/*.bin.tar.xz.sha256
 
-  gh-release:
-    if: ${{ github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/') }}
+  setup-bsd-matrix:
     runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.matrix.outputs.enabled }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+    - name: Build matrix
+      id: matrix
+      env:
+        IS_TAG: ${{ startsWith(github.ref, 'refs/tags/') }}
+        BUILD_BSD: ${{ github.event_name == 'workflow_dispatch' && inputs.build_bsd }}
+        BUILD_BSD_ARM64: ${{ github.event_name == 'workflow_dispatch' && inputs.build_bsd_arm64 }}
+      run: |
+        python3 - <<'PY'
+        import json
+        import os
+
+        build_bsd = os.environ["IS_TAG"] == "true" or os.environ["BUILD_BSD"] == "true"
+        build_bsd_arm64 = os.environ["BUILD_BSD_ARM64"] == "true"
+        include = []
+
+        def add(os_name, arch):
+            include.append({
+                "os": os_name,
+                "arch": arch,
+                "workspace": f"{os_name}-{arch}-source",
+                "artifact": f"artifact-bsd-{os_name}-{arch}",
+                "package_target": f"package-{os_name}",
+                "artifact_dir": os_name,
+            })
+
+        if build_bsd:
+            add("freebsd", "x86_64")
+            add("openbsd", "x86_64")
+        if build_bsd_arm64:
+            add("freebsd", "arm64")
+            add("openbsd", "arm64")
+
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+            output.write(f"enabled={str(bool(include)).lower()}\n")
+            output.write(f"matrix={json.dumps({'include': include}, separators=(',', ':'))}\n")
+        PY
+
+  build-gpgui-frontend:
+    needs: setup-bsd-matrix
+    if: ${{ needs.setup-bsd-matrix.outputs.enabled == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+    - uses: pnpm/action-setup@v5
+      with:
+        version: 9
+    - name: Prepare workspace
+      run: rm -rf gpgui-frontend && mkdir gpgui-frontend
+    - name: Checkout GlobalProtect-openconnect
+      uses: actions/checkout@v6
+      with:
+        token: ${{ secrets.GH_PAT }}
+        repository: yuezk/GlobalProtect-openconnect
+        ref: ${{ github.event_name == 'workflow_dispatch' && inputs.gp_branch || github.ref }}
+        path: gpgui-frontend/gp
+        submodules: recursive
+    - name: Checkout gpgui
+      uses: actions/checkout@v6
+      with:
+        token: ${{ secrets.GH_PAT }}
+        repository: yuezk/gpgui
+        ref: ${{ github.event_name == 'workflow_dispatch' && inputs.gpgui_branch || github.ref_name }}
+        path: gpgui-frontend/gpgui
+    - name: Build gpgui frontend
+      run: |
+        cd gpgui-frontend/gpgui/app
+        pnpm install --frozen-lockfile
+        pnpm build
+    - name: Upload gpgui frontend
+      uses: actions/upload-artifact@v7
+      with:
+        name: bsd-gpgui-frontend
+        if-no-files-found: error
+        path: gpgui-frontend/gpgui/app/dist/**
+
+  build-bsd:
+    needs:
+      - setup-bsd-matrix
+      - build-gpgui-frontend
+    if: ${{ needs.setup-bsd-matrix.outputs.enabled == 'true' }}
+    runs-on: ubuntu-latest
+    name: build-${{ matrix.os }} (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup-bsd-matrix.outputs.matrix) }}
+    steps:
+    - name: Prepare workspace
+      run: rm -rf "${{ matrix.workspace }}" && mkdir "${{ matrix.workspace }}"
+    - name: Checkout GlobalProtect-openconnect
+      uses: actions/checkout@v6
+      with:
+        token: ${{ secrets.GH_PAT }}
+        repository: yuezk/GlobalProtect-openconnect
+        ref: ${{ github.event_name == 'workflow_dispatch' && inputs.gp_branch || github.ref }}
+        path: ${{ matrix.workspace }}/gp
+        submodules: recursive
+    - name: Checkout gpgui
+      uses: actions/checkout@v6
+      with:
+        token: ${{ secrets.GH_PAT }}
+        repository: yuezk/gpgui
+        ref: ${{ github.event_name == 'workflow_dispatch' && inputs.gpgui_branch || github.ref_name }}
+        path: ${{ matrix.workspace }}/gpgui
+    - name: Download gpgui frontend
+      uses: actions/download-artifact@v8
+      with:
+        name: bsd-gpgui-frontend
+        path: ${{ matrix.workspace }}/gpgui/app/dist
+    - name: Build on FreeBSD
+      if: ${{ matrix.os == 'freebsd' }}
+      uses: vmactions/freebsd-vm@v1
+      with:
+        release: "14.4"
+        arch: ${{ matrix.arch }}
+        usesh: true
+        prepare: |
+          pkg install -y \
+            git \
+            rust \
+            libiconv \
+            gettext-tools \
+            autoconf \
+            automake \
+            libtool \
+            patch \
+            gmake \
+            pkgconf \
+            libxml2 \
+            gnutls \
+            p11-kit \
+            nettle \
+            gmp \
+            gnome-keyring \
+            libayatana-appindicator \
+            polkit \
+            webkit2-gtk_41
+        run: |
+          set -eu
+
+          cd "${{ matrix.workspace }}/gp"
+          cargo build --release --workspace
+
+          cd ../gpgui/app/src-tauri
+          cargo build --release --workspace
+
+          cd ../../../gp
+          gmake "${{ matrix.package_target }}" GPGUI_BINARY=../gpgui/target/release/gpgui
+          pkg install -y ".build/${{ matrix.artifact_dir }}"/artifacts/*.pkg
+          gpclient --version
+          gpauth --version
+          gpgui --version
+          rm -rf target ../gpgui/target
+          find ".build/${{ matrix.artifact_dir }}" -mindepth 1 -maxdepth 1 ! -name artifacts -exec rm -rf {} +
+    - name: Build on OpenBSD
+      if: ${{ matrix.os == 'openbsd' }}
+      uses: vmactions/openbsd-vm@v1
+      with:
+        release: "7.9"
+        arch: ${{ matrix.arch }}
+        usesh: true
+        prepare: |
+          pkg_add -z \
+            git \
+            rust \
+            libiconv \
+            gettext-tools \
+            autoconf-2.72 \
+            automake-1.17 \
+            libtool \
+            patch \
+            gmake \
+            pkgconf \
+            libxml \
+            gnutls \
+            p11-kit \
+            nettle \
+            gmp \
+            gnome-keyring \
+            polkit \
+            webkitgtk41
+          ln -sf /usr/local/bin/autoreconf-2.72 /usr/local/bin/autoreconf
+          ln -sf /usr/local/bin/autoconf-2.72 /usr/local/bin/autoconf
+          ln -sf /usr/local/bin/autoheader-2.72 /usr/local/bin/autoheader
+          ln -sf /usr/local/bin/autom4te-2.72 /usr/local/bin/autom4te
+          ln -sf /usr/local/bin/aclocal-1.17 /usr/local/bin/aclocal
+          ln -sf /usr/local/bin/automake-1.17 /usr/local/bin/automake
+        run: |
+          set -eu
+          export AUTOCONF_VERSION=2.72
+          export AUTOMAKE_VERSION=1.17
+
+          cd "${{ matrix.workspace }}/gp"
+          cargo build --release --workspace
+
+          cd ../gpgui/app/src-tauri
+          cargo build --release --workspace
+
+          cd ../../../gp
+          gmake "${{ matrix.package_target }}" GPGUI_BINARY=../gpgui/target/release/gpgui
+          pkg_add -D unsigned ".build/${{ matrix.artifact_dir }}"/artifacts/*.tgz
+          gpclient --version
+          gpauth --version
+          gpgui --version
+          rm -rf target ../gpgui/target
+          find ".build/${{ matrix.artifact_dir }}" -mindepth 1 -maxdepth 1 ! -name artifacts -exec rm -rf {} +
+    - name: Upload BSD package
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ matrix.artifact }}
+        if-no-files-found: error
+        path: |
+          ${{ matrix.workspace }}/gp/.build/${{ matrix.artifact_dir }}/artifacts/*
+
+  gh-release:
+    if: ${{ always() && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')) }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     needs:
       - tarball
       - tarball-offline
       - build-gp
+      - build-docker-image
       - build-gpgui
+      - setup-bsd-matrix
+      - build-gpgui-frontend
+      - build-bsd
 
     steps:
+    - name: Check required jobs
+      env:
+        NEEDS_JSON: ${{ toJson(needs) }}
+        BSD_MATRIX_ENABLED: ${{ needs.setup-bsd-matrix.outputs.enabled }}
+        IS_TAG: ${{ startsWith(github.ref, 'refs/tags/') }}
+      run: |
+        python3 - <<'PY'
+        import json
+        import os
+        import sys
+
+        needs = json.loads(os.environ["NEEDS_JSON"])
+        bsd_matrix_enabled = os.environ["BSD_MATRIX_ENABLED"] == "true"
+        is_tag = os.environ["IS_TAG"] == "true"
+        failed = []
+
+        for name, data in needs.items():
+            result = data["result"]
+            if result in {"failure", "cancelled"}:
+                failed.append(f"{name}: {result}")
+            elif name in {"build-gp", "build-docker-image"} and result == "skipped" and is_tag:
+                continue
+            elif name in {"build-gpgui-frontend", "build-bsd"} and result == "skipped" and not bsd_matrix_enabled:
+                continue
+            elif result == "skipped":
+                failed.append(f"{name}: {result}")
+
+        if failed:
+            print("Required jobs did not complete successfully:")
+            for item in failed:
+                print(f"  - {item}")
+            sys.exit(1)
+        PY
+
     - name: Prepare workspace
       run: rm -rf gh-release && mkdir gh-release
 
     - name: Checkout GlobalProtect-openconnect
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       with:
         token: ${{ secrets.GH_PAT }}
         repository: yuezk/GlobalProtect-openconnect
-        ref: ${{ github.ref }}
+        ref: ${{ github.event_name == 'workflow_dispatch' && inputs.gp_branch || github.ref }}
         path: gh-release/gp
+        submodules: recursive
 
     - name: Download all artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         path: gh-release/gp/.build/artifacts
+
+    - name: Rename APK artifacts
+      run: |
+        shopt -s nullglob
+
+        for file in gh-release/gp/.build/artifacts/artifact-gp-apk-amd64/*.apk; do
+          mv "$file" "${file%.apk}-x86_64.apk"
+        done
+        for file in gh-release/gp/.build/artifacts/artifact-gp-apk-ubuntu-24.04-arm/*.apk; do
+          mv "$file" "${file%.apk}-aarch64.apk"
+        done
+
+    - name: Generate release asset checksums
+      env:
+        RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && 'snapshot' || github.ref_name }}
+      run: |
+        cd gh-release/gp
+        mkdir -p .build
+        scripts/release-assets.sh "$RELEASE_TAG" > .build/release-assets.txt
+        if [ ! -s .build/release-assets.txt ]; then
+          echo "No release assets found"
+          exit 1
+        fi
+        while IFS= read -r file; do
+          digest=$(sha256sum "$file" | cut -d ' ' -f 1)
+          printf '%s  %s\n' "$digest" "$(basename "$file")"
+        done < .build/release-assets.txt > .build/release-assets.sha256
+
+    - name: Attest release assets
+      uses: actions/attest-build-provenance@v4
+      with:
+        subject-checksums: gh-release/gp/.build/release-assets.sha256
 
     - name: Create GH release
       env:
         GH_TOKEN: ${{ secrets.GH_PAT }}
-        RELEASE_TAG: ${{ github.ref == 'refs/heads/dev' && 'snapshot' || github.ref_name }}
+        RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && 'snapshot' || github.ref_name }}
       run: |
         cd gh-release/gp/scripts && ./gh-release.sh "$RELEASE_TAG"
+
+  publish-docker-image:
+    needs:
+      - build-docker-image
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download digests
+      uses: actions/download-artifact@v8
+      with:
+        path: /tmp/digests
+        pattern: digests-*
+        merge-multiple: true
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v4
+    - name: Login to Docker Hub
+      uses: docker/login-action@v4
+      with:
+        username: ${{ secrets.DOCKER_HUB_USERNAME }}
+        password: ${{ secrets.DOCKER_HUB_TOKEN }}
+    - name: Publish Docker manifest
+      working-directory: /tmp/digests
+      env:
+        IMAGE: yuezk/globalprotect-openconnect
+        RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && 'snapshot' || github.ref_name }}
+      run: |
+        docker buildx imagetools create -t "$IMAGE:$RELEASE_TAG" \
+          $(printf "$IMAGE@sha256:%s " *)
+
+        docker buildx imagetools inspect "$IMAGE:$RELEASE_TAG"

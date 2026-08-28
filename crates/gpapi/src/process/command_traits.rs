@@ -2,7 +2,7 @@ use std::ffi::OsStr;
 use tokio::process::Command;
 use uzers::os::unix::UserExt;
 
-use super::users::get_non_root_user;
+use super::{desktop_session_env, users::get_non_root_user};
 
 pub trait CommandExt {
   fn new_pkexec<S: AsRef<OsStr>>(program: S) -> Command;
@@ -11,14 +11,24 @@ pub trait CommandExt {
 
 impl CommandExt for Command {
   fn new_pkexec<S: AsRef<OsStr>>(program: S) -> Command {
-    let mut cmd = Command::new("pkexec");
-    cmd.arg("--user").arg("root").arg(program);
-
-    cmd
+    #[cfg(target_os = "macos")]
+    {
+      let mut cmd = Command::new("sudo");
+      cmd.arg(program);
+      cmd
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+      let mut cmd = Command::new("pkexec");
+      cmd.arg("--user").arg("root").arg(program);
+      cmd
+    }
   }
 
   fn into_non_root(mut self) -> anyhow::Result<Command> {
     let user = get_non_root_user().map_err(|_| anyhow::anyhow!("{:?} cannot be run as root", self))?;
+
+    desktop_session_env::apply(&mut self, user.uid(), user.home_dir());
 
     self
       .env("HOME", user.home_dir())

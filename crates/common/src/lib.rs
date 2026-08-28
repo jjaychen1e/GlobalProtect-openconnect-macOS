@@ -1,1 +1,2 @@
-pub mod vpn_utils;
+pub mod binary_paths;
+pub mod constants;

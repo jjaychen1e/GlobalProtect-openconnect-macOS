@@ -13,23 +13,36 @@ NC='\033[0m' # No Color
 # Configuration
 APP_NAME="GlobalProtectURLHandler"
 APP_PATH="/Applications/${APP_NAME}.app"
-GPCLIENT_PATH="/usr/local/bin/gpclient"
 URL_SCHEME="globalprotectcallback1"
 TEMP_SCRIPT="/tmp/gpclient-url-handler.applescript"
+
+# Resolve gpclient: Homebrew ARM, Homebrew Intel, then PATH.
+resolve_gpclient_path() {
+    if [ -x /opt/homebrew/bin/gpclient ]; then
+        echo /opt/homebrew/bin/gpclient
+    elif [ -x /usr/local/bin/gpclient ]; then
+        echo /usr/local/bin/gpclient
+    elif command -v gpclient >/dev/null 2>&1; then
+        command -v gpclient
+    else
+        return 1
+    fi
+}
 
 echo -e "${GREEN}GlobalProtect URL Handler Installer for macOS${NC}"
 echo "============================================="
 
-# Check if gpclient exists
-if [ ! -f "$GPCLIENT_PATH" ]; then
-    echo -e "${YELLOW}Warning: gpclient not found at $GPCLIENT_PATH${NC}"
+if ! GPCLIENT_PATH="$(resolve_gpclient_path)"; then
+    echo -e "${YELLOW}Warning: gpclient not found in Homebrew prefixes or PATH${NC}"
     echo "Please specify the correct path to gpclient:"
     read -r GPCLIENT_PATH
-    if [ ! -f "$GPCLIENT_PATH" ]; then
+    if [ ! -x "$GPCLIENT_PATH" ]; then
         echo -e "${RED}Error: gpclient not found at $GPCLIENT_PATH${NC}"
         exit 1
     fi
 fi
+
+echo "Using gpclient at: $GPCLIENT_PATH"
 
 # Check if we have write permissions to /Applications
 if [ ! -w "/Applications" ]; then
@@ -154,8 +167,9 @@ else
     echo -e "${YELLOW}⚠ Could not verify registration. You may need to restart or log out/in.${NC}"
 fi
 
-# Create uninstall script
-UNINSTALL_SCRIPT="/usr/local/bin/uninstall-gp-url-handler"
+# Create uninstall script next to gpclient when possible
+UNINSTALL_DIR="$(dirname "$GPCLIENT_PATH")"
+UNINSTALL_SCRIPT="${UNINSTALL_DIR}/uninstall-gp-url-handler"
 echo "Creating uninstall script at $UNINSTALL_SCRIPT..."
 cat > "$UNINSTALL_SCRIPT" << 'UNINSTALL_EOF'
 #!/bin/bash

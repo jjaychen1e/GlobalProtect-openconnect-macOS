@@ -3,7 +3,7 @@ use std::path::Path;
 use log::{info, warn};
 use regex::Regex;
 use tempfile::NamedTempFile;
-use version_compare::{compare_to, Cmp};
+use version_compare::{Cmp, compare_to};
 
 pub fn openssl_conf() -> String {
   let option = get_openssl_option();
@@ -46,7 +46,7 @@ pub fn fix_openssl_env() -> anyhow::Result<NamedTempFile> {
   let openssl_conf_path = openssl_conf.path();
 
   fix_openssl(openssl_conf_path)?;
-  std::env::set_var("OPENSSL_CONF", openssl_conf_path);
+  unsafe { std::env::set_var("OPENSSL_CONF", openssl_conf_path) };
 
   Ok(openssl_conf)
 }

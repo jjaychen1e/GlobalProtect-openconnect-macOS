@@ -1,8 +1,8 @@
 use chacha20poly1305::{
+  AeadCore, ChaCha20Poly1305, Key, KeyInit,
   aead::{Aead, OsRng},
-  AeadCore, ChaCha20Poly1305, Key, KeyInit, Nonce,
 };
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 pub fn generate_key() -> Key {
   ChaCha20Poly1305::generate_key(&mut OsRng)
@@ -31,10 +31,10 @@ where
 {
   let cipher = ChaCha20Poly1305::new(key);
 
-  let nonce = Nonce::from_slice(&encrypted[..12]);
+  let nonce = &encrypted[..12];
   let cipher_text = &encrypted[12..];
 
-  let plaintext = cipher.decrypt(nonce, cipher_text)?;
+  let plaintext = cipher.decrypt(nonce.into(), cipher_text)?;
 
   let value = serde_json::from_slice(&plaintext)?;
 

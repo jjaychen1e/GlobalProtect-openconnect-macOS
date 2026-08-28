@@ -3,20 +3,27 @@ use std::{collections::HashMap, io::Write};
 
 use anyhow::bail;
 use clap::Parser;
+use common::constants::GP_SERVICE_LOCK_FILE;
 use gpapi::clap::InfoLevelVerbosity;
 use gpapi::logger;
 use gpapi::{
   process::gui_launcher::GuiLauncher,
   service::{request::WsRequest, vpn_state::VpnState},
   utils::{crypto::generate_key, env_utils, lock_file::LockFile, redact::Redaction, shutdown_signal},
-  GP_SERVICE_LOCK_FILE,
 };
 use log::{info, warn};
 use tokio::sync::{mpsc, watch};
 
 use crate::{vpn_task::VpnTask, ws_server::WsServer};
 
-const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", compile_time::date_str!(), ")");
+const VERSION: &str = concat!(
+  env!("CARGO_PKG_VERSION"),
+  " (",
+  env!("GPSERVICE_GIT_COMMIT"),
+  " ",
+  compile_time::date_str!(),
+  ")"
+);
 
 #[derive(Parser)]
 #[command(version = VERSION)]
@@ -120,7 +127,7 @@ impl Cli {
         let timestamp = buf.timestamp();
         writeln!(
           buf,
-          "[{} {}  {}] {}",
+          "[{} {:<5} {}] {}",
           timestamp,
           record.level(),
           record.module_path().unwrap_or_default(),
@@ -159,7 +166,7 @@ mod signals {
 
   pub async fn handle_signals(vpn_ctx: Arc<VpnTaskContext>, ws_ctx: Arc<WsServerContext>) {
     use gpapi::service::event::WsEvent;
-    use tokio::signal::unix::{signal, Signal, SignalKind};
+    use tokio::signal::unix::{Signal, SignalKind, signal};
 
     let (mut user_sig1, mut user_sig2) = match || -> anyhow::Result<(Signal, Signal)> {
       let user_sig1 = signal(SignalKind::user_defined1())?;

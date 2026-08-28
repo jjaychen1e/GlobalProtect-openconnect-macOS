@@ -12,6 +12,7 @@ void *g_user_data;
 static int g_cmd_pipe_fd;
 static const char *g_vpnc_script;
 static const char *g_vpnc_interface;
+static int g_script_tun;
 static vpn_connected_callback on_vpn_connected;
 
 /* Validate the peer certificate */
@@ -34,35 +35,54 @@ static void print_progress(__attribute__((unused)) void *_vpninfo, int level,
 	if (message == NULL) {
 		ERROR("Failed to format log message");
 	} else {
-		LOG(level, message);
+		vpn_log(level, message);
 		free(message);
 	}
 }
 
 static void setup_tun_handler(void *_vpninfo)
 {
-	int ret = openconnect_setup_tun_device(_vpninfo, g_vpnc_script,
-					       g_vpnc_interface);
+	int ret;
+	if (g_script_tun) {
+		ret = openconnect_setup_tun_script(_vpninfo, g_vpnc_script);
+	} else {
+		ret = openconnect_setup_tun_device(_vpninfo, g_vpnc_script,
+						   g_vpnc_interface);
+	}
+
 	if (!ret) {
-		on_vpn_connected(g_cmd_pipe_fd, g_user_data);
+		vpn_session_info session_info = {
+			.auth_expiration = (long)openconnect_get_auth_expiration(_vpninfo),
+			.lifetime_secs = openconnect_get_gp_session_lifetime(_vpninfo),
+			.user_expires = (long)openconnect_get_gp_user_expires(_vpninfo),
+			.lifetime_warning_prior =
+			    openconnect_get_gp_lifetime_notify_prior(_vpninfo),
+			.lifetime_warning_message =
+			    openconnect_get_gp_lifetime_notify_message(_vpninfo),
+		};
+		on_vpn_connected(g_cmd_pipe_fd, &session_info, g_user_data);
 	}
 }
 
 /* Initialize VPN connection */
 int vpn_connect(const vpn_options *options, vpn_connected_callback callback)
 {
-	INFO("openconnect version: %s", openconnect_get_version());
 	struct openconnect_info *vpninfo;
 	struct utsname utsbuf;
+	const char *effective_local_hostname = NULL;
 
 	g_user_data = options->user_data;
 	g_vpnc_script = options->script;
 	g_vpnc_interface = options->interface;
+	g_script_tun = options->script_tun;
 	on_vpn_connected = callback;
 
-	INFO("User agent: %s", options->user_agent);
-	INFO("VPNC script: %s", options->script);
+	INFO("USER_AGENT: %s", options->user_agent);
 	INFO("OS: %s", options->os);
+	INFO("CLIENT_VERSION: %s", options->client_version);
+	INFO("HOST_ID: %s", options->host_id ? options->host_id : "(not set)");
+	INFO("VPNC_SCRIPT: %s", options->script);
+	INFO("SCRIPT_TUN: %d", g_script_tun);
 	INFO("CSD_USER: %d", options->csd_uid);
 	INFO("CSD_WRAPPER: %s", options->csd_wrapper);
 	INFO("RECONNECT_TIMEOUT: %d", options->reconnect_timeout);
@@ -70,6 +90,7 @@ int vpn_connect(const vpn_options *options, vpn_connected_callback callback)
 	INFO("DISABLE_IPV6: %d", options->disable_ipv6);
 	INFO("NO_DTLS: %d", options->no_dtls);
 	INFO("DPD_INTERVAL: %d", options->dpd_interval);
+	INFO("NO_XMLPOST: %d", options->no_xmlpost);
 
 	vpninfo =
 	    openconnect_vpninfo_new(options->user_agent, validate_peer_cert,
@@ -85,10 +106,35 @@ int vpn_connect(const vpn_options *options, vpn_connected_callback callback)
 	openconnect_set_protocol(vpninfo, "gp");
 	openconnect_parse_url(vpninfo, options->server);
 	openconnect_set_cookie(vpninfo, options->cookie);
+	openconnect_set_useragent(vpninfo, options->user_agent);
 
 	if (options->os) {
 		openconnect_set_reported_os(vpninfo, options->os);
 	}
+
+	if (options->os_version) {
+		openconnect_set_gp_os_version(vpninfo, options->os_version);
+	}
+
+	if (options->client_version) {
+		openconnect_set_gp_app_version(vpninfo,
+					       options->client_version);
+	}
+
+	if (options->host_id) {
+		openconnect_set_gp_host_id(vpninfo, options->host_id);
+	}
+
+	effective_local_hostname = options->local_hostname;
+	if (!effective_local_hostname && !uname(&utsbuf)) {
+		effective_local_hostname = utsbuf.nodename;
+	}
+	if (effective_local_hostname) {
+		openconnect_set_localname(vpninfo, effective_local_hostname);
+	}
+
+	INFO("LOCAL_HOSTNAME: %s",
+	     effective_local_hostname ? effective_local_hostname : "(not set)");
 
 	if (options->certificate) {
 		INFO("Setting client certificate: %s", options->certificate);
@@ -98,6 +144,10 @@ int vpn_connect(const vpn_options *options, vpn_connected_callback callback)
 
 	if (options->key_password) {
 		openconnect_set_key_password(vpninfo, options->key_password);
+	}
+
+	if (options->no_xmlpost) {
+		openconnect_set_xmlpost(vpninfo, 0);
 	}
 
 	if (options->csd_wrapper) {
@@ -122,10 +172,6 @@ int vpn_connect(const vpn_options *options, vpn_connected_callback callback)
 	if (g_cmd_pipe_fd < 0) {
 		ERROR("openconnect_setup_cmd_pipe failed");
 		return 1;
-	}
-
-	if (!uname(&utsbuf)) {
-		openconnect_set_localname(vpninfo, utsbuf.nodename);
 	}
 
 	// Essential step

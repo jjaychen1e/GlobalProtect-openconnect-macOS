@@ -1,11 +1,11 @@
 use std::{collections::HashMap, env::temp_dir, fs, path::PathBuf};
 
 use clap::Args;
+use common::constants::GP_CALLBACK_PORT_FILENAME;
 use directories::ProjectDirs;
 use gpapi::{
   process::service_launcher::ServiceLauncher,
   utils::{endpoint::http_endpoint, env_utils, shutdown_signal},
-  GP_CALLBACK_PORT_FILENAME,
 };
 use log::info;
 use tokio::io::AsyncWriteExt;
@@ -32,7 +32,7 @@ impl<'a> LaunchGuiHandler<'a> {
 
   pub(crate) async fn handle(&self) -> anyhow::Result<()> {
     // `launch-gui`cannot be run as root
-    let user = whoami::username();
+    let user = whoami::username().map_err(|err| anyhow::anyhow!("Failed to resolve current user: {err}"))?;
     if user == "root" {
       anyhow::bail!("`launch-gui` cannot be run as root");
     }

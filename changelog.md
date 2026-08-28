@@ -1,5 +1,129 @@
 # Changelog
 
+## 2.6.5
+
+### Fixed
+
+- Fixed duplicate tray icons caused by both Tauri configuration and application code creating a tray icon (fix [#464](https://github.com/yuezk/GlobalProtect-openconnect/issues/464)).
+- Fixed a potential crash when VPN progress messages contain printf-style format specifiers.
+
+## 2.6.4
+
+### Fixed
+
+- Fixed gateway login MFA OTP retries sending duplicate `passwd` form fields, which could cause authentication to fail with HTTP 512 after 2.6.0 (fix [#626](https://github.com/yuezk/GlobalProtect-openconnect/issues/626)).
+
+## 2.6.3
+
+### Fixed
+
+- Fixed NixOS GUI launch authorization after package updates.
+- Fixed disconnect handling so a normal Ctrl+C logout no longer reports an error.
+- Fixed snapshot flake hash update automation for prebuilt Nix packages.
+
+## 2.6.2
+
+### Fixed
+
+- Fixed gateway fallback browser authentication when external browser authentication is explicitly requested.
+- Added logging for portal config default-browser behavior.
+- Added GUI managed configuration support with `gpgui.conf`, including reset to managed config.
+- Improved GUI config directory migration and managed license auto activation.
+
+## 2.6.1
+
+### Changed
+
+- Improved external browser authentication so `--browser` chooses Chrome first, then Firefox, then the system default browser.
+- Improved NixOS prebuilt package integration for launching helper binaries and desktop services.
+- Updated the release process to publish GitHub release notes from the changelog.
+
+### Fixed
+
+- Fixed NixOS GUI launch failures caused by package-local binary paths.
+- Fixed NixOS tray icon setup documentation for GNOME desktops.
+- Fixed browser authentication for portals that require a client certificate.
+- Fixed release automation so Nix flake hash updates are run manually after release assets are available.
+
+## 2.6.0
+
+### Added
+
+- Added automatic gateway selection with fallback to the next available gateway when early gateway connection steps fail.
+- Added optional cookie cache support for faster reconnects.
+- Added Microsoft Defender status reporting in HIP reports.
+- Added support for portals that require client-side checks before connection.
+- Added FreeBSD and OpenBSD package builds and release artifacts.
+- Added build provenance attestations for release assets.
+
+### Changed
+
+- Improved compatibility with official GlobalProtect client request behavior.
+- Improved SAML authentication behavior in the embedded webview.
+- Improved default browser authentication handling.
+- Improved host identity consistency across authentication, connection, and HIP flows.
+- Improved GUI gateway selection behavior and made the selection list more compact.
+- Updated NixOS installation instructions.
+
+### Fixed
+
+- Fixed a crash when opening settings on KDE/Wayland.
+- Fixed browser authentication when `gpclient` is started with `sudo`.
+- Fixed gateway fallback behavior when using `gpauth | gpclient --cookie-on-stdin`.
+- Fixed inconsistent host ID handling between GUI, CLI, OpenConnect, and HIP.
+- Fixed portal and gateway authentication cookie handling in several edge cases.
+- Fixed GUI connection state issues around gateway switching and cached credentials.
+
+## 2.5.4 - 2026-05-08
+
+- Add Alpine/musl gpgui release assets for x86_64 and aarch64.
+- Use the musl gpgui asset when the helper or package build runs on musl Linux.
+
+## 2.5.3 - 2026-05-08
+
+- Fix systemd-resolved DNS routing when no split-DNS domains are provided (fix [#604](https://github.com/yuezk/GlobalProtect-openconnect/issues/604)).
+- Log whether systemd-resolved uses server-provided split DNS or global VPN DNS.
+
+## 2.5.2 - 2026-05-06
+
+- Experimental: GUI/CLI add session expiry warnings and support automatic session extension when allowed by the portal.
+- GUI/CLI: expose additional OpenConnect connection options.
+- Fix Linux packages to vendor the `vpnc-script`.
+- Remove OpenConnect from the packaging dependency.
+- Fix reconnect handling by preserving GlobalProtect cookie fields.
+- Fix auth callback data parsing
+- Improve NixOS packaging and user-level installation docs.
+- Upgrade Rust, Tauri, Vite, frontend, and Rust dependencies.
+
+## 2.5.1 - 2025-12-22
+
+- Fix the `.deb` package installation issue (fix [#563](https://github.com/yuezk/GlobalProtect-openconnect/issues/563))
+- GUI: fix the tray icon size issue on GNOME Flashback (fix [#564](https://github.com/yuezk/GlobalProtect-openconnect/issues/564))
+- Improve the HIP report generation logic
+
+## 2.5.0 - 2025-12-08
+
+- GUI/CLI: statically link OpenConnect
+- GUI/CLI: support configure the client version
+- CLI: add the `-S/--script-tun` option to pass traffic to the `--script` handler
+- GUI: update the branding to `GP Connect`
+
+## 2.4.7 - 2025-11-12
+
+- Support NixOS package installation
+- Fix the VPNC script location on Void Linux
+- Upgrade to Rust 1.85
+- `--browser` without argument uses the system default browser
+
+## 2.4.6 - 2025-10-15
+
+- GUI: support the default configuration file for GUI client (fix [#492](https://github.com/yuezk/GlobalProtect-openconnect/issues/492))
+- GUI: add the option to not reuse the authentication cookies (fix [#540](https://github.com/yuezk/GlobalProtect-openconnect/issues/540))
+- GUI: improve the license validation logic (fix [#502](https://github.com/yuezk/GlobalProtect-openconnect/issues/502))
+- CLI: support the `--browser remote` option to use the remote browser for authentication ([#544](https://github.com/yuezk/GlobalProtect-openconnect/pull/544) by [@dark12](https://github.com/dark12))
+- CLI: fix gpclient disconnect bailing with client is already running issue ([#542](https://github.com/yuezk/GlobalProtect-openconnect/pull/542) by [@zeroepoch](https://github.com/zeroepoch))
+- CLI: fix the `--passwd-on-stdin` reads again on gateway failure ([#546](https://github.com/yuezk/GlobalProtect-openconnect/issues/546))
+
 ## 2.4.5 - 2025-07-16
 
 - GUI/CLI: fix the issue that the custom port is not supported issue (fix [#404](https://github.com/yuezk/GlobalProtect-openconnect/issues/404))

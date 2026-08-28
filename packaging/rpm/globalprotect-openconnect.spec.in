@@ -9,12 +9,21 @@ URL:            https://github.com/yuezk/GlobalProtect-openconnect
 Source:         @SOURCE@
 
 BuildRequires:  make
-BuildRequires:  rust
+BuildRequires:  libtool
+BuildRequires:  autoconf
+BuildRequires:  automake
+BuildRequires:  gettext
+BuildRequires:  gcc-c++
 BuildRequires:  cargo
-BuildRequires:  jq
 BuildRequires:  pkg-config
-BuildRequires:  openconnect-devel
 BuildRequires:  (openssl-devel or libopenssl-devel)
+BuildRequires:  libxml2-devel
+BuildRequires:  zlib-devel
+BuildRequires:  (lz4-devel or liblz4-devel)
+BuildRequires:  gnutls-devel
+BuildRequires:  p11-kit-devel
+BuildRequires:  (nettle-devel or libnettle-devel)
+BuildRequires:  gmp-devel
 BuildRequires:  wget
 BuildRequires:  file
 BuildRequires:  perl
@@ -28,7 +37,7 @@ BuildRequires:  webkit2gtk4.1-devel
 BuildRequires:  (libappindicator-gtk3-devel or libappindicator3-1)
 BuildRequires:  (librsvg2-devel or librsvg-devel)
 
-Requires:       openconnect >= 8.20, (libappindicator-gtk3 or libayatana-appindicator)
+Requires:       (libappindicator-gtk3 or libayatana-appindicator)
 Conflicts:      globalprotect-openconnect-snapshot
 
 %global debug_package %{nil}
@@ -45,7 +54,7 @@ rm -f %{_bindir}/gpgui
 %build
 # The injected RUSTFLAGS could fail the build
 unset RUSTFLAGS
-make build OFFLINE=@OFFLINE@ BUILD_FE=0
+make build
 
 %install
 %make_install
@@ -53,6 +62,8 @@ make build OFFLINE=@OFFLINE@ BUILD_FE=0
 %files
 %defattr(-,root,root)
 %{_bindir}/*
+%{_libexecdir}/gpclient/vpnc-script
+%{_libexecdir}/gpclient/hipreport.sh
 %{_datadir}/applications/gpgui.desktop
 %{_datadir}/icons/hicolor/32x32/apps/gpgui.png
 %{_datadir}/icons/hicolor/128x128/apps/gpgui.png
@@ -67,6 +78,8 @@ make build OFFLINE=@OFFLINE@ BUILD_FE=0
 /usr/lib/NetworkManager/dispatcher.d/pre-down.d/gpclient.down
 /usr/lib/NetworkManager/dispatcher.d/gpclient-nm-hook
 
+%dir %{_libexecdir}
+%dir %{_libexecdir}/gpclient
 %dir %{_datadir}/icons/hicolor
 %dir %{_datadir}/icons/hicolor/32x32
 %dir %{_datadir}/icons/hicolor/32x32/apps

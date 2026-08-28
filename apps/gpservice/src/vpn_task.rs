@@ -4,12 +4,13 @@ use gpapi::{
   logger,
   service::{
     request::{ConnectRequest, UpdateLogLevelRequest, WsRequest},
-    vpn_state::VpnState,
+    vpn_state::{ConnectedInfo, VpnState},
   },
+  session::{SessionInfo, SessionWarning},
 };
 use log::{info, warn};
 use openconnect::Vpn;
-use tokio::sync::{mpsc, oneshot, watch, RwLock};
+use tokio::sync::{RwLock, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) struct VpnTaskContext {
@@ -38,19 +39,27 @@ impl VpnTaskContext {
     let info = req.info().clone();
     let vpn_handle = Arc::clone(&self.vpn_handle);
     let args = req.args();
+    let allow_extend_session = args.allow_extend_session();
     let vpn = match Vpn::builder(req.gateway().server(), args.cookie())
       .script(args.vpnc_script())
       .user_agent(args.user_agent())
       .os(args.openconnect_os())
+      .os_version(args.os_version())
+      .client_version(args.client_version())
+      .host_id(args.host_id())
       .certificate(args.certificate())
       .sslkey(args.sslkey())
       .key_password(args.key_password())
+      .hip(args.hip())
       .csd_uid(args.csd_uid())
       .csd_wrapper(args.csd_wrapper())
       .reconnect_timeout(args.reconnect_timeout())
       .mtu(args.mtu())
       .disable_ipv6(args.disable_ipv6())
       .no_dtls(args.no_dtls())
+      .local_hostname(args.local_hostname())
+      .dpd_interval(args.force_dpd())
+      .no_xmlpost(args.no_xmlpost())
       .build()
     {
       Ok(vpn) => vpn,
@@ -75,9 +84,19 @@ impl VpnTaskContext {
       let vpn_state_tx_clone = vpn_state_tx.clone();
 
       vpn_handle.blocking_read().as_ref().map(|vpn| {
-        vpn.connect(move || {
-          let connect_info = Box::new(info.clone());
-          vpn_state_tx.send(VpnState::Connected(connect_info)).ok();
+        vpn.connect(move |vpn_session_info| {
+          let session_info = SessionInfo::from_vpn_session_fields(
+            vpn_session_info.lifetime_secs,
+            vpn_session_info.user_expires,
+            vpn_session_info.lifetime_warning.map(|warning| SessionWarning {
+              prior_secs: warning.prior_secs,
+              message: warning.message,
+            }),
+            allow_extend_session,
+          );
+          info!("VPN session info: {}", session_info.log_summary());
+          let connected_info = Box::new(ConnectedInfo::new(info.clone(), Some(session_info)));
+          vpn_state_tx.send(VpnState::Connected(connected_info)).ok();
         })
       });
 
@@ -106,7 +125,6 @@ impl VpnTaskContext {
     } else {
       info!("VPN is not connected, skip disconnect");
       self.vpn_state_tx.send(VpnState::Disconnected).ok();
-
       false
     }
   }
@@ -176,5 +194,44 @@ async fn process_ws_req(req: WsRequest, ctx: Arc<VpnTaskContext>) {
         warn!("Failed to update log level: {}", err);
       }
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn maps_openconnect_session_metadata_to_service_session_info() {
+    let info = SessionInfo::from_vpn_session_fields(
+      Some(43_200),
+      None,
+      Some(SessionWarning {
+        prior_secs: 1_800,
+        message: "Session expires soon".to_string(),
+      }),
+      true,
+    );
+
+    assert_eq!(info.lifetime_secs, Some(43_200));
+    assert_eq!(info.expires_in_human.as_deref(), Some("12h"));
+    assert_eq!(info.lifetime_warning.unwrap().prior_secs, 1_800);
+    assert!(info.allow_extend_session);
+  }
+
+  #[test]
+  fn direct_request_session_metadata_keeps_extension_disabled() {
+    let info = SessionInfo::from_vpn_session_fields(
+      Some(43_200),
+      None,
+      Some(SessionWarning {
+        prior_secs: 1_800,
+        message: "Session expires soon".to_string(),
+      }),
+      false,
+    );
+
+    assert_eq!(info.lifetime_secs, Some(43_200));
+    assert!(!info.allow_extend_session);
   }
 }

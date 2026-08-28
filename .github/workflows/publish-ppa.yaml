@@ -1,0 +1,151 @@
+name: Publish PPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish'
+        required: true
+      revision:
+        description: 'Package revision'
+        required: false
+        default: "1"
+      series:
+        description: 'Space-separated Ubuntu series. Leave empty to publish all supported series.'
+        type: "string"
+        required: false
+        default: ""
+      rust:
+        description: 'Rust version to use'
+        type: "string"
+        required: true
+        default: "1.89"
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check tag exists
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TAG: ${{ inputs.tag }}
+      run: |
+        if ! gh api "repos/${{ github.repository }}/git/ref/tags/$TAG" >/dev/null 2>&1; then
+          echo "Tag $TAG does not exist"
+          exit 1
+        fi
+
+  resolve-series:
+    needs: check
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+    - name: Resolve Ubuntu series
+      id: resolve
+      env:
+        INPUT_SERIES: ${{ inputs.series }}
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y distro-info distro-info-data
+
+        if [[ "$INPUT_SERIES" == *","* ]]; then
+          echo "Use space-separated series, for example: jammy noble" >&2
+          exit 1
+        fi
+
+        series=()
+        if [[ -z "${INPUT_SERIES// }" ]]; then
+          while IFS= read -r item; do
+            [[ -n "$item" ]] && series+=("$item")
+          done < <(ubuntu-distro-info --supported)
+        else
+          read -r -a series <<< "$INPUT_SERIES"
+        fi
+
+        if [[ "${#series[@]}" -eq 0 ]]; then
+          echo "No Ubuntu series resolved" >&2
+          exit 1
+        fi
+
+        for item in "${series[@]}"; do
+          ubuntu-distro-info --series "$item" >/dev/null
+        done
+
+        matrix="$(printf '%s\n' "${series[@]}" | jq -R . | jq -s -c '{series: .}')"
+        echo "Resolved matrix: $matrix"
+        echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  publish-ppa:
+    needs: [check, resolve-series]
+    name: publish-ppa (${{ matrix.series }})
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:${{ matrix.series }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve-series.outputs.matrix) }}
+    steps:
+    - name: Install container tools
+      run: |
+        apt-get update
+        apt-get install -y ca-certificates curl gpg sudo
+        mkdir -p /etc/apt/keyrings
+        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+          | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+        chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+          > /etc/apt/sources.list.d/github-cli.list
+        apt-get update
+        apt-get install -y gh
+    - name: Prepare workspace
+      run: rm -rf publish-ppa && mkdir publish-ppa
+    - name: Download ${{ inputs.tag }} offline source code
+      env:
+        GH_TOKEN: ${{ secrets.GH_PAT }}
+      run: |
+        gh -R yuezk/GlobalProtect-openconnect \
+          release download ${{ inputs.tag }} \
+          --pattern '*.offline.tar.gz' \
+          --dir publish-ppa
+    - name: Patch the source code
+      run: |
+        cd publish-ppa
+
+        # Rename the source tarball without the offline suffix
+        mv -v *.tar.gz $(basename *.tar.gz .offline.tar.gz).tar.gz
+
+        # Extract the source tarball
+        tar -xzf *.tar.gz
+
+        # Prepare the debian directory with custom files
+        cd globalprotect-openconnect-*/
+
+        # Prepare the debian directory with custom files
+        mkdir -p .build/debian
+
+        cp -v packaging/deb/control.in .build/debian/control
+        cp -v packaging/deb/rules.in .build/debian/rules
+        cp -v packaging/deb/compat .build/debian/compat
+        cp -v packaging/deb/postrm .build/debian/postrm
+
+        sed -i "s/@BUILD_GUI_HELPER@/1/g" .build/debian/rules
+        sed -i "s/@BUILD_WEBVIEW_AUTH@/1/g" .build/debian/rules
+
+        # Update the control file with the correct Rust version
+        sed -i "s/@RUST_VERSION@/${{ inputs.rust }}/g" .build/debian/control
+        sed -i "s/@RUST_VERSION@/${{ inputs.rust }}/g" .build/debian/rules
+        sed -i "s/DISABLE_RUST_TOOLCHAIN = 0/DISABLE_RUST_TOOLCHAIN = 1/g" .build/debian/rules
+
+    - name: Publish to PPA
+      uses: yuezk/publish-ppa-package@main
+      with:
+        repository: "yuezk/globalprotect-openconnect"
+        gpg_private_key: ${{ secrets.PPA_GPG_PRIVATE_KEY }}
+        gpg_passphrase: ${{ secrets.PPA_GPG_PASSPHRASE }}
+        tarball: publish-ppa/globalprotect-openconnect-*.tar.gz
+        debian_dir: publish-ppa/globalprotect-openconnect-*/.build/debian
+        deb_email: ${{ vars.DEB_EMAIL }}
+        deb_fullname: ${{ vars.DEB_FULLNAME }}
+        extra_ppa: "yuezk/globalprotect-openconnect"
+        series: ${{ matrix.series }}
+        revision: ${{ inputs.revision }}
