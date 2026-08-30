@@ -1,0 +1,16 @@
+node_modules
+.raycast-offline
+raycast-env.d.ts
+
+# ray build output, written next to the sources
+*.js
+*.js.map
+
+# Raycast Swift support, created on demand
+.raycast-swift-build
+.swiftpm
+compiled_raycast_swift
+
+__pycache__/
+*.py[cod]
+.DS_Store

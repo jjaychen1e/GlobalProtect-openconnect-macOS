@@ -17,6 +17,9 @@ pub struct StoredCookie {
   pub username: String,
   pub host_id: String,
   pub last_gateway: String,
+  /// Hostnames from the last portal getconfig. Absent in older cookie files.
+  #[serde(default)]
+  pub gateways: Vec<String>,
   pub auth_cookie: AuthCookieCredential,
   pub saved_at: u64,
 }
@@ -28,6 +31,7 @@ impl StoredCookie {
     host_id: String,
     last_gateway: String,
     auth_cookie: AuthCookieCredential,
+    gateways: Vec<String>,
   ) -> Self {
     let saved_at = std::time::SystemTime::now()
       .duration_since(std::time::UNIX_EPOCH)
@@ -39,6 +43,7 @@ impl StoredCookie {
       username,
       host_id,
       last_gateway,
+      gateways,
       auth_cookie,
       saved_at,
     }
@@ -146,6 +151,7 @@ mod tests {
       "host-1".to_string(),
       "gw1.example.com".to_string(),
       AuthCookieCredential::new("alice", "user-auth", "prelogon-auth"),
+      vec!["gw1.example.com".to_string(), "gw2.example.com".to_string()],
     )
   }
 
@@ -164,6 +170,10 @@ mod tests {
     assert_eq!(loaded.username, "alice");
     assert_eq!(loaded.host_id, "host-1");
     assert_eq!(loaded.last_gateway, "gw1.example.com");
+    assert_eq!(
+      loaded.gateways,
+      vec!["gw1.example.com".to_string(), "gw2.example.com".to_string()]
+    );
     assert_eq!(loaded.auth_cookie.user_auth_cookie(), "user-auth");
 
     assert!(
@@ -186,5 +196,24 @@ mod tests {
     s.version = STORE_VERSION + 1;
     save(&path, &s).unwrap();
     assert!(load(&path, "vpn.example.com", "host-1").is_none());
+  }
+
+  #[test]
+  fn missing_gateways_field_defaults_to_empty() {
+    let json = r#"{
+      "version": 1,
+      "server": "vpn.example.com",
+      "username": "alice",
+      "host_id": "host-1",
+      "last_gateway": "gw1.example.com",
+      "auth_cookie": {
+        "username": "alice",
+        "userAuthCookie": "user-auth",
+        "prelogonUserAuthCookie": "prelogon-auth"
+      },
+      "saved_at": 1
+    }"#;
+    let stored: StoredCookie = serde_json::from_str(json).unwrap();
+    assert!(stored.gateways.is_empty());
   }
 }

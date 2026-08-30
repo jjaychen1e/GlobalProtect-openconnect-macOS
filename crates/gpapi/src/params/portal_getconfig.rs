@@ -152,7 +152,7 @@ mod tests {
   }
 
   #[test]
-  fn saml_without_portal_auth_cookies_uses_empty_sentinel() {
+  fn saml_without_portal_auth_cookies_sends_blank() {
     let profile = test_profile(ClientOs::Mac);
     let cred = Credential::Prelogin(PreloginCredential::new("alice", Some("my-prelogin-cookie"), None, None));
     let gp_params = GpParams::builder(profile.clone()).build();
@@ -160,12 +160,12 @@ mod tests {
 
     let find = |key: &str| result.body.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
 
-    assert_eq!(find("portal-userauthcookie"), Some("empty"));
-    assert_eq!(find("portal-prelogonuserauthcookie"), Some("empty"));
+    assert_eq!(find("portal-userauthcookie"), Some(""));
+    assert_eq!(find("portal-prelogonuserauthcookie"), Some(""));
   }
 
   #[test]
-  fn saml_blank_portal_auth_cookie_uses_empty_sentinel() {
+  fn saml_blank_portal_auth_cookie_sends_blank() {
     let profile = test_profile(ClientOs::Mac);
     let cred = Credential::Prelogin(PreloginCredential::new(
       "alice",
@@ -182,7 +182,7 @@ mod tests {
       .find(|(k, _)| k == "portal-userauthcookie")
       .map(|(_, v)| v.as_str());
 
-    assert_eq!(portal_cookie, Some("empty"));
+    assert_eq!(portal_cookie, Some(""));
   }
 
   #[test]

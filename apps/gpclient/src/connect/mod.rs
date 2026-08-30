@@ -21,7 +21,7 @@ use crate::cli::SharedArgs;
 
 pub(crate) use args::ConnectArgs;
 use args::{build_os_profile, build_os_profile_with_host_id, warn_deprecated_connect_args};
-use credential::CleanAuthState;
+use credential::{CleanAuthState, skip_portal_prelogin};
 use gateway::GatewayConnectError;
 
 pub(crate) struct ConnectHandler<'a> {
@@ -32,6 +32,7 @@ pub(crate) struct ConnectHandler<'a> {
   password_from_stdin: RefCell<Option<String>>,
   cookie_from_stdin: RefCell<Option<String>>,
   clean_auth_state: RefCell<CleanAuthState>,
+  portal_gateways: RefCell<Vec<String>>,
 }
 
 impl<'a> ConnectHandler<'a> {
@@ -51,6 +52,7 @@ impl<'a> ConnectHandler<'a> {
       password_from_stdin: Default::default(),
       cookie_from_stdin: Default::default(),
       clean_auth_state: RefCell::new(CleanAuthState::new(clean_auth)),
+      portal_gateways: Default::default(),
     }
   }
 
@@ -184,12 +186,23 @@ impl<'a> ConnectHandler<'a> {
   async fn connect_portal_with_prelogin(&self, portal: &str) -> anyhow::Result<()> {
     let gp_params = self.build_gp_params();
 
-    let prelogin = prelogin(portal, &gp_params, self.prelogin_options(false)).await?;
+    // gpauth already ran portal prelogin + SAML. A second prelogin here can
+    // invalidate that CAS token and make getconfig return HTTP 512 auth-failed.
+    let (cred, region) = if skip_portal_prelogin(self.args.cookie_on_stdin) {
+      info!("Skipping portal prelogin; using --cookie-on-stdin credentials");
+      (self.read_cookie_from_stdin()?, String::new())
+    } else {
+      let prelogin = prelogin(portal, &gp_params, self.prelogin_options(false)).await?;
+      let cred = self.obtain_credential(&prelogin, portal, false).await?;
+      (cred, prelogin.region().to_string())
+    };
 
-    let cred = self.obtain_credential(&prelogin, portal, false).await?;
     let mut portal_config = retrieve_config(portal, &cred, &gp_params).await?;
+    *self.portal_gateways.borrow_mut() = portal_config.gateway_servers();
 
-    portal_config.sort_gateways(prelogin.region());
+    if !region.is_empty() {
+      portal_config.sort_gateways(&region);
+    }
 
     let auth_cookie = match cred.password() {
       Some(password) => portal_config.auth_cookie().clone().with_password(password),

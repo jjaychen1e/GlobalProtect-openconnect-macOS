@@ -44,6 +44,8 @@ enum CliCommand {
   Disconnect(DisconnectArgs),
   #[command(about = "Launch the GUI")]
   LaunchGui(LaunchGuiArgs),
+  #[command(about = "Exit 0 if a CLI tunnel is running, 1 otherwise")]
+  Status,
   #[command(about = "Generate HIP report")]
   Hip(HipArgs),
 }
@@ -134,8 +136,9 @@ impl Cli {
   }
 
   async fn run(&self) -> anyhow::Result<()> {
-    // check if an instance is running
-    if !matches!(self.command, CliCommand::Disconnect(_)) && self.is_running().await {
+    // `launch-gui` with a callback URL must run while `gpclient connect` is
+    // already up: the URL handler forwards SSO to the waiting gpauth.
+    if !command_allowed_while_running(&self.command) && self.is_running().await {
       bail!("Another instance of the client is already running");
     }
 
@@ -157,9 +160,24 @@ impl Cli {
       CliCommand::Connect(args) => ConnectHandler::new(args, &shared_args).handle().await,
       CliCommand::Disconnect(args) => DisconnectHandler::new(args).handle().await,
       CliCommand::LaunchGui(args) => LaunchGuiHandler::new(args).handle().await,
+      CliCommand::Status => {
+        if self.is_running().await {
+          Ok(())
+        } else {
+          anyhow::bail!("not running");
+        }
+      }
       CliCommand::Hip(args) => HipHandler::new(args).handle().await,
     }
   }
+}
+
+/// Disconnect and callback `launch-gui` must run while a tunnel is up.
+fn command_allowed_while_running(command: &CliCommand) -> bool {
+  matches!(
+    command,
+    CliCommand::Disconnect(_) | CliCommand::LaunchGui(_) | CliCommand::Status
+  )
 }
 
 fn build_logger(cli: &Cli) -> env_logger::Builder {
@@ -212,6 +230,18 @@ mod tests {
 
   fn parse_cli(args: &[&str]) -> Cli {
     Cli::try_parse_from(args).expect("arguments should parse")
+  }
+
+  #[test]
+  fn launch_gui_and_disconnect_are_allowed_while_running() {
+    let disconnect = parse_cli(&["gpclient", "disconnect"]);
+    assert!(command_allowed_while_running(&disconnect.command));
+    let launch = parse_cli(&["gpclient", "launch-gui", "globalprotectcallback1:test"]);
+    assert!(command_allowed_while_running(&launch.command));
+    let connect = parse_cli(&["gpclient", "connect", "portal.example.com"]);
+    assert!(!command_allowed_while_running(&connect.command));
+    let status = parse_cli(&["gpclient", "status"]);
+    assert!(command_allowed_while_running(&status.command));
   }
 
   /// Text stays the default: a plain `gpclient connect` must keep the output it

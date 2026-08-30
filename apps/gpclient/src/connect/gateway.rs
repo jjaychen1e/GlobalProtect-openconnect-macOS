@@ -1,5 +1,6 @@
 use std::{
   fs,
+  os::unix::fs::PermissionsExt,
   sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -13,8 +14,9 @@ use gpapi::{
   gateway::{GatewayLogin, GatewayLoginContext, SessionExtensionAuth, gateway_login, gateway_login_with_context},
   gp_params::GpParams,
   os_profile::OsProfile,
-  portal::prelogin,
+  portal::{prelogin, retrieve_config},
   process::users::{get_non_root_user, get_user_by_name},
+  session::SessionInfo,
   utils::shutdown_signal,
 };
 use inquire::Text;
@@ -30,6 +32,22 @@ use crate::{
 use super::{ConnectHandler, args::cookie_cache_path};
 
 const OPENCONNECT_INTERRUPTED_EXIT_CODE: i32 = -4;
+
+/// Root writes the cookie; chown it to the directory owner so the user process can stat it.
+fn chown_to_parent_owner(path: &std::path::Path) {
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::{chown, MetadataExt};
+    let Some(dir) = path.parent() else {
+      return;
+    };
+    if let Ok(meta) = fs::metadata(dir) {
+      if let Err(err) = chown(path, Some(meta.uid()), Some(meta.gid())) {
+        warn!("Failed to chown cookie cache {}: {}", path.display(), err);
+      }
+    }
+  }
+}
 
 struct GatewayLoginSession {
   cookie: String,
@@ -91,31 +109,45 @@ impl ConnectHandler<'_> {
       return None;
     }
 
+    let gateway = cached_cookie_gateway(self.args.gateway.as_deref(), &stored.last_gateway).to_string();
+    if gateway.is_empty() {
+      warn!("Cached portal cookie for {} has no gateway to connect to", stored.server);
+      return None;
+    }
+
     info!(
       "Using cached portal cookie for {} (saved_at={}, gateway={})",
-      stored.server, stored.saved_at, stored.last_gateway
+      stored.server, stored.saved_at, gateway
     );
 
     let cred: Credential = (&stored.auth_cookie).into();
+    let auth_cookie = self
+      .refresh_portal_from_cookie(server, &cred, &stored.gateways)
+      .await
+      .unwrap_or_else(|| stored.auth_cookie.clone());
+    let cred: Credential = (&auth_cookie).into();
+
     let mut gp_params = self.build_gp_params();
     gp_params.set_is_gateway(true);
 
-    let login_session = match self.login_gateway(&stored.last_gateway, &cred, &gp_params, None).await {
+    let login_session = match self.login_gateway(&gateway, &cred, &gp_params, None).await {
       Ok(session) => session,
       Err(err) => {
         warn!(
           "Cached portal cookie rejected by gateway {}: {}. Clearing cache and falling back to portal auth.",
-          stored.last_gateway, err
+          gateway, err
         );
         cookie_store::clear(&path);
         return None;
       }
     };
 
+    self.save_cookie_cache(server, &gateway, &auth_cookie);
+
     match self
       .connect_gateway(
         server,
-        &stored.last_gateway,
+        &gateway,
         &login_session.cookie,
         false,
         login_session.extension_auth,
@@ -125,6 +157,37 @@ impl ConnectHandler<'_> {
       Ok(()) => Some(()),
       Err(err) => {
         warn!("Gateway connect failed after cached-cookie login: {}", err.as_error());
+        None
+      }
+    }
+  }
+
+  /// Best-effort portal getconfig with the cached cookie. Refreshes the gateway
+  /// list and returns the auth cookie the portal just issued, so the cache does
+  /// not keep replaying an increasingly old cookie.
+  async fn refresh_portal_from_cookie(
+    &self,
+    portal: &str,
+    cred: &Credential,
+    stored_gateways: &[String],
+  ) -> Option<AuthCookieCredential> {
+    let gp_params = self.build_gp_params();
+    match retrieve_config(portal, cred, &gp_params).await {
+      Ok(config) => {
+        let servers = config.gateway_servers();
+        info!("Cached-cookie getconfig: {} gateway(s)", servers.len());
+        *self.portal_gateways.borrow_mut() = if servers.is_empty() {
+          stored_gateways.to_vec()
+        } else {
+          servers
+        };
+
+        let auth_cookie = config.auth_cookie().clone();
+        auth_cookie.can_authenticate_gateway().then_some(auth_cookie)
+      }
+      Err(err) => {
+        warn!("Cached-cookie getconfig failed: {}; keeping stored gateway list", err);
+        *self.portal_gateways.borrow_mut() = stored_gateways.to_vec();
         None
       }
     }
@@ -263,16 +326,24 @@ impl ConnectHandler<'_> {
       return;
     }
 
+    let mut gateways = self.portal_gateways.borrow().clone();
+    if !gateway.is_empty() && !gateways.iter().any(|item| item == gateway) {
+      gateways.insert(0, gateway.to_string());
+    }
     let stored = cookie_store::StoredCookie::new(
       portal.to_string(),
       auth_cookie.username().to_string(),
       self.os_profile.borrow().host_identity().host_id().to_string(),
       gateway.to_string(),
       auth_cookie.clone(),
+      gateways,
     );
 
     match cookie_store::save(&path, &stored) {
-      Ok(()) => info!("Saved portal cookie cache to {}", path.display()),
+      Ok(()) => {
+        chown_to_parent_owner(&path);
+        info!("Saved portal cookie cache to {}", path.display());
+      }
       Err(err) => warn!("Failed to save portal cookie cache to {}: {}", path.display(), err),
     }
   }
@@ -399,15 +470,22 @@ impl ConnectHandler<'_> {
     });
 
     let log_format = self.shared_args.log_format;
+    let session_pid_path = cookie_cache_path(self.args).map(|path| path.with_file_name("session.pid"));
+    let session_info_path = cookie_cache_path(self.args).map(|path| path.with_file_name("session.json"));
+    let session_pid_on_connect = session_pid_path.clone();
+    let session_info_on_connect = session_info_path.clone();
+    let session_gateway = gateway.to_string();
     let connect_result = vpn.connect(move |vpn_session_info| {
       tunnel_established_on_connect.store(true, Ordering::SeqCst);
-      write_pid_file();
+      write_pid_file(session_pid_on_connect.as_deref());
+
+      let session_info = session_info_from_vpn(vpn_session_info, allow_extend_session);
+      info!("VPN session info: {}", session_info.log_summary());
+      write_session_info_file(session_info_on_connect.as_deref(), &session_info, &session_gateway);
 
       let Some(session_ctx) = session_ctx_on_connect.lock().unwrap().take() else {
         return;
       };
-      let session_info = session_info_from_vpn(vpn_session_info, allow_extend_session);
-      info!("VPN session info: {}", session_info.log_summary());
 
       let task = spawn_session_runtime_with_info(&runtime_handle, session_ctx, session_info, log_format);
       session_task_on_connect.lock().unwrap().replace(task);
@@ -421,6 +499,12 @@ impl ConnectHandler<'_> {
     if fs::metadata(GP_CLIENT_LOCK_FILE).is_ok() {
       info!("Removing PID file");
       fs::remove_file(GP_CLIENT_LOCK_FILE).map_err(|err| GatewayConnectError::after_tunnel(err.into()))?;
+    }
+    if let Some(ref path) = session_pid_path {
+      let _ = fs::remove_file(path);
+    }
+    if let Some(ref path) = session_info_path {
+      let _ = fs::remove_file(path);
     }
 
     let disconnect_requested = disconnect_requested.load(Ordering::SeqCst);
@@ -473,14 +557,68 @@ fn direct_gateway_command(gateway: &str) -> String {
   format!("gpauth --gateway {gateway} | sudo gpclient connect {gateway} --as-gateway --cookie-on-stdin")
 }
 
-fn write_pid_file() {
-  let pid = std::process::id();
+/// Prefer `--gateway` on reconnect; otherwise the last successful gateway from the cookie.
+fn cached_cookie_gateway<'a>(cli_gateway: Option<&'a str>, last_gateway: &'a str) -> &'a str {
+  cli_gateway.filter(|value| !value.is_empty()).unwrap_or(last_gateway)
+}
 
-  if let Err(err) = fs::write(GP_CLIENT_LOCK_FILE, pid.to_string()) {
+/// Publish the gateway session lifetime so a menu bar or status tool can show
+/// when the user must authenticate again. `allow_extend_session` is the portal
+/// policy: when false, nothing renews the session before `user_expires`.
+fn write_session_info_file(path: Option<&std::path::Path>, session_info: &SessionInfo, gateway: &str) {
+  let Some(path) = path else {
+    return;
+  };
+  let payload = serde_json::json!({
+    "gateway": gateway,
+    "lifetimeSecs": session_info.lifetime_secs,
+    "userExpires": session_info.user_expires,
+    "allowExtendSession": session_info.allow_extend_session,
+    "writtenAt": std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .map(|d| d.as_secs())
+      .unwrap_or(0),
+  });
+
+  if let Some(dir) = path.parent() {
+    let _ = fs::create_dir_all(dir);
+  }
+  match serde_json::to_vec(&payload) {
+    Ok(bytes) => {
+      if let Err(err) = fs::write(path, bytes) {
+        warn!("Failed to write session info {}: {}", path.display(), err);
+        return;
+      }
+      let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o644));
+      chown_to_parent_owner(path);
+      info!("Wrote session info to {}", path.display());
+    }
+    Err(err) => warn!("Failed to serialize session info: {}", err),
+  }
+}
+
+fn write_pid_file(user_pid_file: Option<&std::path::Path>) {
+  let pid = std::process::id().to_string();
+
+  if let Err(err) = fs::write(GP_CLIENT_LOCK_FILE, &pid) {
     warn!("Failed to write PID file: {}", err);
   } else {
     info!("Wrote PID {} to {}", pid, GP_CLIENT_LOCK_FILE);
   }
+
+  let Some(path) = user_pid_file else {
+    return;
+  };
+  if let Some(dir) = path.parent() {
+    let _ = fs::create_dir_all(dir);
+  }
+  if let Err(err) = fs::write(path, &pid) {
+    warn!("Failed to write user session pid {}: {}", path.display(), err);
+    return;
+  }
+  let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o644));
+  chown_to_parent_owner(path);
+  info!("Wrote PID {} to {}", pid, path.display());
 }
 
 fn get_uid(user: &Option<String>) -> anyhow::Result<u32> {
@@ -527,6 +665,16 @@ mod tests {
   #[test]
   fn interrupted_exit_after_requested_disconnect_is_success() {
     assert!(classify_openconnect_result(OPENCONNECT_INTERRUPTED_EXIT_CODE, true, true).is_ok());
+  }
+
+  #[test]
+  fn cached_cookie_prefers_cli_gateway_over_last_gateway() {
+    assert_eq!(
+      cached_cookie_gateway(Some("gw-b.example"), "gw-a.example"),
+      "gw-b.example"
+    );
+    assert_eq!(cached_cookie_gateway(Some(""), "gw-a.example"), "gw-a.example");
+    assert_eq!(cached_cookie_gateway(None, "gw-a.example"), "gw-a.example");
   }
 
   #[test]

@@ -47,13 +47,23 @@ pub(crate) fn build(cred: &Credential, gp_params: &GpParams) -> Vec<(String, Str
     "prelogin-cookie".to_string(),
     prelogin_cookie.unwrap_or_default().to_string(),
   ));
-  params.push((
-    "portal-userauthcookie".to_string(),
-    portal_cookie_param(portal_userauthcookie),
-  ));
+
+  // Official reconnect uses the literal "empty" sentinel. CAS/SAML prelogin
+  // (this NVIDIA portal) treats that string as a bogus cookie and returns HTTP 512.
+  // Match 2.4.5: send a blank field when the prelogin result has no portal cookies.
+  let portal_userauthcookie = match cred {
+    Credential::Prelogin(_) | Credential::Password(_) => portal_userauthcookie.unwrap_or_default().to_string(),
+    _ => portal_cookie_param(portal_userauthcookie),
+  };
+  let portal_prelogonuserauthcookie = match cred {
+    Credential::Prelogin(_) | Credential::Password(_) => portal_prelogonuserauthcookie.unwrap_or_default().to_string(),
+    _ => portal_cookie_param(portal_prelogonuserauthcookie),
+  };
+
+  params.push(("portal-userauthcookie".to_string(), portal_userauthcookie));
   params.push((
     "portal-prelogonuserauthcookie".to_string(),
-    portal_cookie_param(portal_prelogonuserauthcookie),
+    portal_prelogonuserauthcookie,
   ));
 
   params.push(("token".to_string(), token.unwrap_or_default().to_string()));

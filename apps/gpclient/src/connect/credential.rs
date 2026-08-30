@@ -136,7 +136,7 @@ impl ConnectHandler<'_> {
     }
   }
 
-  fn read_cookie_from_stdin(&self) -> anyhow::Result<Credential> {
+  pub(super) fn read_cookie_from_stdin(&self) -> anyhow::Result<Credential> {
     if let Some(cookie) = self.cookie_from_stdin.borrow().as_ref() {
       info!("Reusing the cookie read from standard input");
       return Credential::try_from(serde_json::from_str::<SamlAuthResult>(cookie)?);
@@ -187,6 +187,12 @@ impl ConnectHandler<'_> {
 
 fn should_read_stdin_credential(cookie_on_stdin: bool, as_gateway: bool, prelogin_is_gateway: bool) -> bool {
   cookie_on_stdin && (!prelogin_is_gateway || as_gateway)
+}
+
+/// Skip portal prelogin when stdin already holds a gpauth CAS/SAML result.
+/// A second portal prelogin can invalidate that token (HTTP 512 auth-failed).
+pub(super) fn skip_portal_prelogin(cookie_on_stdin: bool) -> bool {
+  cookie_on_stdin
 }
 
 fn can_use_external_browser_auth(
@@ -251,6 +257,12 @@ mod tests {
   fn stdin_credential_is_not_used_when_flag_is_disabled() {
     assert!(!should_read_stdin_credential(false, false, false));
     assert!(!should_read_stdin_credential(false, true, true));
+  }
+
+  #[test]
+  fn portal_prelogin_is_skipped_when_cookie_is_on_stdin() {
+    assert!(skip_portal_prelogin(true));
+    assert!(!skip_portal_prelogin(false));
   }
 
   #[test]

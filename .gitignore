@@ -5,6 +5,10 @@
 .vendor
 *.tar.xz
 
+.DS_Store
+__pycache__/
+*.py[cod]
+
 .cargo
 .build
 SNAPSHOT

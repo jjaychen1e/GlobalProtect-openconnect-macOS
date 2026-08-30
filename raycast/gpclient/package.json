@@ -1,0 +1,110 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "gpclient",
+  "title": "GlobalProtect VPN",
+  "description": "Menu bar controls for reconnecting, disconnecting, and switching gateways",
+  "icon": "icon.png",
+  "author": "junjiec",
+  "platforms": [
+    "macOS"
+  ],
+  "categories": [
+    "Developer Tools",
+    "Productivity"
+  ],
+  "license": "MIT",
+  "commands": [
+    {
+      "name": "menu-bar",
+      "title": "VPN Menu Bar",
+      "subtitle": "gpclient",
+      "description": "Show VPN status and connect, disconnect, or switch gateway from the menu bar",
+      "mode": "menu-bar",
+      "interval": "10s"
+    },
+    {
+      "name": "first-login",
+      "title": "Sign In with SSO",
+      "subtitle": "gpclient",
+      "description": "Open the browser for SSO, then connect and save the cookie cache. Needed once per gateway session (about weekly), not only the first time.",
+      "mode": "no-view"
+    },
+    {
+      "name": "reconnect",
+      "title": "Reconnect VPN",
+      "subtitle": "gpclient",
+      "description": "Reconnect using the cached portal cookie",
+      "mode": "no-view"
+    },
+    {
+      "name": "disconnect",
+      "title": "Disconnect VPN",
+      "subtitle": "gpclient",
+      "description": "Disconnect the GlobalProtect tunnel",
+      "mode": "no-view"
+    },
+    {
+      "name": "split-tunnel",
+      "title": "Configure Split Tunnel",
+      "subtitle": "gpclient",
+      "description": "Edit the vpn-slice DNS domains, routed subnets, and hosts as separate lists",
+      "mode": "view"
+    },
+    {
+      "name": "live-progress",
+      "title": "VPN Live Progress",
+      "subtitle": "gpclient",
+      "description": "Step list that auto-refreshes. The menu bar dropdown cannot update while it is open.",
+      "mode": "view"
+    }
+  ],
+  "preferences": [
+    {
+      "name": "portal",
+      "type": "textfield",
+      "required": true,
+      "title": "Portal",
+      "description": "Portal hostname",
+      "placeholder": "portal.example.com"
+    },
+    {
+      "name": "gateway",
+      "type": "textfield",
+      "required": true,
+      "title": "Default gateway",
+      "description": "Gateway used by Reconnect. Other gateways come from the portal after the first successful connect.",
+      "placeholder": "gateway.example.com"
+    },
+    {
+      "name": "gateways",
+      "type": "textfield",
+      "required": false,
+      "title": "Other gateways",
+      "description": "Comma-separated hostnames shown under Switch Gateway",
+      "placeholder": "gateway-b.example.com, gateway-c.example.com"
+    },
+    {
+      "name": "cookiePath",
+      "type": "textfield",
+      "required": false,
+      "title": "Cookie cache path",
+      "description": "Leave empty to use ~/.config/gpclient/cookie.json"
+    }
+  ],
+  "dependencies": {
+    "@raycast/api": "^1.93.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "typescript": "^5.7.0"
+  },
+  "scripts": {
+    "build": "ray build",
+    "dev": "ray develop",
+    "lint": "ray lint"
+  },
+  "allowScripts": {
+    "esbuild@0.27.7": true
+  }
+}

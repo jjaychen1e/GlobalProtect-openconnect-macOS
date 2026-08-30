@@ -58,6 +58,16 @@ impl PortalConfig {
     self.gateways.iter().collect()
   }
 
+  /// Server hostnames from this portal config, skipping empty entries.
+  pub fn gateway_servers(&self) -> Vec<String> {
+    self
+      .gateways()
+      .iter()
+      .map(|gateway| gateway.server().to_string())
+      .filter(|server| !server.is_empty())
+      .collect()
+  }
+
   pub fn auth_cookie(&self) -> &AuthCookieCredential {
     &self.auth_cookie
   }
@@ -421,8 +431,8 @@ mod tests {
         <gateways>
           <external>
             <list>
-              <entry name="US_East">
-                <description>us1.vpn.example.com</description>
+              <entry name="us1.vpn.example.com">
+                <description>US_East</description>
               </entry>
             </list>
           </external>
@@ -436,5 +446,6 @@ mod tests {
     assert_eq!(config.auth_cookie().user_auth_cookie(), "user-cookie");
     assert_eq!(config.auth_cookie().prelogon_user_auth_cookie(), "prelogon-cookie");
     assert_eq!(config.gateways().len(), 1);
+    assert_eq!(config.gateway_servers(), vec!["us1.vpn.example.com"]);
   }
 }

@@ -1,8 +1,11 @@
 use std::io::Cursor;
 
+use common::constants::GP_CALLBACK_SCHEME;
 use log::info;
 use tiny_http::{Header, Method, Response, Server};
 use uuid::Uuid;
+
+const OFFICIAL_CALLBACK_SCHEME: &str = "globalprotectcallback:";
 
 pub(super) struct AuthServer {
   server: Server,
@@ -48,6 +51,7 @@ impl AuthServer {
 }
 
 fn build_auth_response(auth_request: &str) -> Response<Cursor<Vec<u8>>> {
+  let auth_request = rewrite_official_callback_scheme(auth_request);
   if auth_request.starts_with("http") {
     let header = format!("location: {}", auth_request);
     let header: Header = header.parse().unwrap();
@@ -57,5 +61,34 @@ fn build_auth_response(auth_request: &str) -> Response<Cursor<Vec<u8>>> {
   } else {
     let content_type: Header = "content-type: text/html".parse().unwrap();
     Response::from_string(auth_request).with_header(content_type)
+  }
+}
+
+/// Map the official GlobalProtect callback scheme to this fork's scheme.
+/// NVIDIA SSO HTML still emits `globalprotectcallback:`; the macOS handler is `globalprotectcallback1`.
+fn rewrite_official_callback_scheme(input: &str) -> String {
+  let ours = format!("{}:", GP_CALLBACK_SCHEME);
+  if OFFICIAL_CALLBACK_SCHEME == ours {
+    return input.to_string();
+  }
+  const PLACEHOLDER: &str = "\u{E000}gp-callback-scheme\u{E000}";
+  input
+    .replace(&ours, PLACEHOLDER)
+    .replace(OFFICIAL_CALLBACK_SCHEME, &ours)
+    .replace(PLACEHOLDER, &ours)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn rewrites_official_scheme_and_keeps_callback1() {
+    let html = r#"href="globalprotectcallback:cas-as=1" and already globalprotectcallback1:keep""#;
+    let rewritten = rewrite_official_callback_scheme(html);
+    assert!(rewritten.contains("globalprotectcallback1:cas-as=1"));
+    assert!(rewritten.contains("globalprotectcallback1:keep"));
+    assert!(!rewritten.contains("globalprotectcallback11:"));
+    assert!(!rewritten.contains("globalprotectcallback:cas"));
   }
 }
