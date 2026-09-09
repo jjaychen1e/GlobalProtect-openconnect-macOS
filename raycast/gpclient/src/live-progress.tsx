@@ -22,6 +22,7 @@ import {
   progressHeadline,
   readProgress,
   stepIcon,
+  takePendingAction,
   type LiveProgressContext,
   type OperationProgress,
 } from "./progress";
@@ -45,14 +46,16 @@ export default function Command(
 
   // Kick off the requested action after the first paint so the window is
   // already visible while `sudo gp-disconnect` blocks for a second or two.
+  // Tinycast drops launchContext; takePendingAction reads the sidecar instead.
   useEffect(() => {
-    const action = props.launchContext?.action;
     if (started.current) {
       return;
     }
     started.current = true;
+    const requested = props.launchContext ?? takePendingAction();
+    const action = requested?.action;
     logProgressEvent(
-      `live-progress opened context=${JSON.stringify(props.launchContext ?? null)}`,
+      `live-progress opened launchContext=${JSON.stringify(props.launchContext ?? null)} pending=${JSON.stringify(requested ?? null)}`,
     );
     if (
       action !== "disconnect" &&
@@ -68,7 +71,7 @@ export default function Command(
         if (action === "disconnect") {
           disconnectVpn();
         } else {
-          reconnect(props.launchContext?.gateway);
+          reconnect(requested?.gateway);
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

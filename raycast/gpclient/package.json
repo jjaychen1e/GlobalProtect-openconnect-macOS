@@ -2,7 +2,7 @@
   "$schema": "https://www.raycast.com/schemas/extension.json",
   "name": "gpclient",
   "title": "GlobalProtect VPN",
-  "description": "Menu bar controls for reconnecting, disconnecting, and switching gateways",
+  "description": "VPN Status dashboard and menu-bar controls for reconnecting, disconnecting, and switching gateways",
   "icon": "icon.png",
   "author": "junjiec",
   "platforms": [
@@ -23,11 +23,25 @@
       "interval": "10s"
     },
     {
+      "name": "status",
+      "title": "VPN Status",
+      "subtitle": "gpclient",
+      "description": "Dashboard for connection, session, tunnel mode, and the actions the menu bar hosts. Use this in Tinycast; Tinycast does not run menu-bar commands.",
+      "mode": "view"
+    },
+    {
       "name": "first-login",
       "title": "Sign In with SSO",
       "subtitle": "gpclient",
       "description": "Open the browser for SSO, then connect and save the cookie cache. Needed once per gateway session (about weekly), not only the first time.",
       "mode": "no-view"
+    },
+    {
+      "name": "switch-gateway",
+      "title": "Switch Gateway",
+      "subtitle": "gpclient",
+      "description": "Pick a portal gateway and connect. Use this in Tinycast; the menu-bar Switch Gateway submenu is not available there.",
+      "mode": "view"
     },
     {
       "name": "reconnect",

@@ -1,8 +1,12 @@
-# Raycast menu bar for gpclient
+# Raycast / Tinycast extension for gpclient
 
-Reconnect, disconnect, and switch gateways from the macOS menu bar.
+Reconnect, disconnect, and switch gateways from **VPN Status** (Tinycast) or the macOS menu bar (Raycast). **Switch Gateway** is a standalone list of portal hosts; VPN Status also lists those hosts so you can switch from the dashboard.
 
 This extension is not in the Raycast Store, so it installs from this folder. Raycast cannot install an extension from a git URL.
+
+Tinycast does not run `menu-bar` commands. Use **VPN Status** or **Switch Gateway**, and bind a global hotkey in Tinycast Settings → Extensions → GlobalProtect VPN. **VPN Menu Bar** stays in the package for Raycast; Tinycast shows it as an unsupported mode. Connecting from Status or Switch Gateway never launches the menu-bar command.
+
+Tinycast also drops `launchCommand` context, so a switch that opened **VPN Live Progress** used to land on an empty page and keep the old gateway. On Tinycast, picking a gateway now reconnects in the same list; watch the Progress row and the Current check mark. Raycast still opens Live Progress.
 
 ## Install
 
@@ -10,11 +14,11 @@ This extension is not in the Raycast Store, so it installs from this folder. Ray
 2. `./install-macos-url-handler.sh` from the repository root, so `globalprotectcallback1://` is registered.
 3. `cd raycast/gpclient && npm install && npx ray develop`. Raycast picks the extension up while this runs; press `Ctrl+C` once the commands show in Raycast search. Re-run it after adding or renaming a command in `package.json` — `ray build` alone leaves Raycast on the old command list and `launchCommand` then fails with `Command not found`.
 4. `bash install-sudoers.sh`. This installs `gp-disconnect` and a `/etc/sudoers.d/gpclient` drop-in so connecting and disconnecting do not ask for a macOS password.
-5. Run **VPN Menu Bar** once so the lock icon stays in the menu bar.
+5. Raycast: run **VPN Menu Bar** once so the lock icon stays in the menu bar. Tinycast: run **VPN Status**. After you add or rename a command, rebuild (`npx ray build`) and re-import or copy the new `*.js` plus `package.json` into `~/Library/Application Support/com.tinycast.app/extensions/gpclient/`.
 
 ## Configure
 
-Raycast Settings → Extensions → **GlobalProtect VPN**:
+Raycast or Tinycast Settings → Extensions → **GlobalProtect VPN**:
 
 | Preference | Value |
 | --- | --- |
@@ -25,13 +29,13 @@ Raycast Settings → Extensions → **GlobalProtect VPN**:
 
 Split tunnel hosts are not a preference; see [Tunnel mode](#tunnel-mode-and-split-tunnel) below.
 
-Then use **Sign in with SSO** in the menu once, so a cookie exists.
+Then use **Sign in with SSO** in VPN Status or the menu once, so a cookie exists.
 
 ## Signing in
 
-Use **Sign in with SSO** in the menu. The browser opens immediately; Raycast does not wait. After SSO, macOS may ask for an admin password once to start the tunnel. Do not add `--os-version`.
+Use **Sign in with SSO** in VPN Status or the menu. The browser opens immediately; the launcher does not wait. After SSO, macOS may ask for an admin password once to start the tunnel. Do not add `--os-version`.
 
-This is not only a first-time step. The gateway sets an absolute session expiry (`user_expires`) at sign-in and, when the portal sets `allow_extend_session=false`, nothing renews it — reconnecting reuses the same session. The menu shows `Session ends in …`; when it runs out, sign in again.
+This is not only a first-time step. The gateway sets an absolute session expiry (`user_expires`) at sign-in and, when the portal sets `allow_extend_session=false`, nothing renews it — reconnecting reuses the same session. VPN Status and the menu show remaining time; when it runs out, sign in again.
 
 ## Progress
 
@@ -58,11 +62,11 @@ A host only needs its own entry when its address falls outside every routed subn
 
 ## Errors
 
-Failed actions copy the message to the clipboard (when Raycast is still in the foreground) and write `~/Library/Logs/gpclient-raycast-last.txt`. The SSO helper also shows a macOS notification. Use **Copy last error** in the menu if the HUD already disappeared.
+Failed actions copy the message to the clipboard (when the launcher is still in the foreground) and write `~/Library/Logs/gpclient-raycast-last.txt` with an ISO timestamp on the first line. VPN Status shows that clock plus a relative age (`2h ago`) so a leftover error is not read as the current failure. The SSO helper also shows a macOS notification. Use **Copy Last Error** in VPN Status or the menu if the HUD already disappeared.
 
 ## Logs
 
-Menu bar → **Logs** opens one of these files in Console.app, which tails it live. Each entry shows how old the file is, so you can tell which run is the current one.
+VPN Status → **Logs** (or the menu-bar Logs submenu) opens one of these files in Console.app, which tails it live. Each entry shows how old the file is, so you can tell which run is the current one.
 
 - `~/Library/Logs/gpclient-raycast-reconnect.log`
 - `~/Library/Logs/gpclient-raycast-first-login.log`

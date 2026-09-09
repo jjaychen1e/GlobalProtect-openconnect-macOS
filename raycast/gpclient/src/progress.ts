@@ -1,4 +1,4 @@
-import { Color, Icon, LaunchType, launchCommand } from "@raycast/api";
+import { Color, Icon, LaunchType, environment, launchCommand } from "@raycast/api";
 import {
   appendFileSync,
   existsSync,
@@ -62,16 +62,63 @@ export interface LiveProgressContext {
   gateway?: string;
 }
 
+interface PendingAction extends LiveProgressContext {
+  writtenAt: number;
+}
+
+const PENDING_MAX_AGE_MS = 60_000;
+
+/** Sidecar so Live Progress still sees the action when the host drops launchContext. */
+export function pendingActionPath(): string {
+  return join(homedir(), "Library/Logs/gpclient-raycast-pending.json");
+}
+
+/** Tinycast cannot run menu-bar commands and drops launchCommand context. */
+export function isTinycastHost(): boolean {
+  return /tinycast/i.test(environment.supportPath);
+}
+
+/** Write the next action to disk before launching another command. */
+export function writePendingAction(context: LiveProgressContext): void {
+  const path = pendingActionPath();
+  mkdirSync(dirname(path), { recursive: true });
+  const pending: PendingAction = { ...context, writtenAt: Date.now() };
+  writeFileSync(path, JSON.stringify(pending));
+  logProgressEvent(`pending action ${JSON.stringify(context)}`);
+}
+
+/** Read and delete a pending action written in the last minute. */
+export function takePendingAction(): LiveProgressContext | undefined {
+  const path = pendingActionPath();
+  try {
+    const pending = JSON.parse(readFileSync(path, "utf8")) as PendingAction;
+    unlinkSync(path);
+    if (
+      !pending?.action ||
+      Date.now() - pending.writtenAt > PENDING_MAX_AGE_MS
+    ) {
+      return undefined;
+    }
+    return { action: pending.action, gateway: pending.gateway };
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Open the live-updating step window, optionally telling it to run an action.
  * Raycast only knows commands it has indexed, so a fresh command needs a
  * Raycast restart (or re-import) before this resolves.
+ * Tinycast drops `launchCommand` context, so the action is also written to disk.
  */
 export async function openLiveProgress(
   context?: LiveProgressContext,
 ): Promise<void> {
+  if (context) {
+    writePendingAction(context);
+  }
   logProgressEvent(
-    `menu-bar launch live-progress context=${JSON.stringify(context ?? null)}`,
+    `launch live-progress context=${JSON.stringify(context ?? null)}`,
   );
   await launchCommand({
     name: "live-progress",
@@ -85,8 +132,16 @@ export async function openLiveProgress(
   });
 }
 
+/** Tinycast cannot run menu-bar commands; launching one surfaces a host error. */
+function hostSupportsMenuBar(): boolean {
+  return !isTinycastHost();
+}
+
 /** Re-render the menu bar extra so the icon switches to loading without waiting for the interval. */
 export function requestMenuRefresh(): void {
+  if (!hostSupportsMenuBar()) {
+    return;
+  }
   void launchCommand({ name: "menu-bar", type: LaunchType.Background }).catch(
     () => {
       // Interval will pick up the progress file.

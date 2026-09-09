@@ -123,6 +123,25 @@ export function openInConsole(path: string): void {
   );
 }
 
+/** Relative age from a timestamp, e.g. `12m ago`. */
+export function formatAge(at: Date | number, now = Date.now()): string {
+  const then = typeof at === "number" ? at : at.getTime();
+  const minutes = Math.floor((now - then) / 60_000);
+  if (minutes < 1) {
+    return "just now";
+  }
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`;
+}
+
+/** Clock plus relative age, so a stale last-error is not read as current. */
+export function formatWhen(at: Date, now = Date.now()): string {
+  return `${at.toLocaleString()} · ${formatAge(at, now)}`;
+}
+
 /** Menu-bar subtitle telling how stale a log is, e.g. `12m ago` or `no output yet`. */
 export function logAge(path: string, now = Date.now()): string {
   let stats;
@@ -134,15 +153,7 @@ export function logAge(path: string, now = Date.now()): string {
   if (stats.size === 0) {
     return "empty";
   }
-  const minutes = Math.floor((now - stats.mtimeMs) / 60_000);
-  if (minutes < 1) {
-    return "just now";
-  }
-  if (minutes < 60) {
-    return `${minutes}m ago`;
-  }
-  const hours = Math.floor(minutes / 60);
-  return hours < 24 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`;
+  return formatAge(stats.mtimeMs, now);
 }
 
 export interface LogGroup {
@@ -254,12 +265,30 @@ export function notifyMac(message: string, title = "VPN"): void {
   }
 }
 
-/** Read the last recorded error, if any. */
-export function readLastError(): string {
+export interface LastError {
+  message: string;
+  at: Date;
+}
+
+const ISO_LINE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
+
+/** Read the last recorded error and when it was written. */
+export function readLastError(): LastError | undefined {
   try {
-    return readFileSync(lastErrorPath(), "utf8").trim();
+    const path = lastErrorPath();
+    const raw = readFileSync(path, "utf8").trim();
+    if (!raw) {
+      return undefined;
+    }
+    const newline = raw.indexOf("\n");
+    const first = newline === -1 ? raw : raw.slice(0, newline);
+    const rest = newline === -1 ? "" : raw.slice(newline + 1).trim();
+    if (ISO_LINE.test(first) && rest) {
+      return { message: rest, at: new Date(first) };
+    }
+    return { message: raw, at: statSync(path).mtime };
   } catch {
-    return "";
+    return undefined;
   }
 }
 
@@ -540,10 +569,10 @@ function bufferText(value?: Buffer | string): string {
 
 /** Persist the error so the menu can copy it after the HUD disappears. */
 function recordError(message: string): void {
-  const stamped = `${new Date().toISOString()} ${message}\n`;
+  const at = new Date().toISOString();
   mkdirSync(dirname(errorLogPath()), { recursive: true });
-  writeFileSync(lastErrorPath(), message);
-  appendFileSync(errorLogPath(), stamped);
+  writeFileSync(lastErrorPath(), `${at}\n${message}\n`);
+  appendFileSync(errorLogPath(), `${at} ${message}\n`);
 }
 
 function sudoNeedsPassword(message: string): boolean {

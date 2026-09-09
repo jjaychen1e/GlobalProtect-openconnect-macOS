@@ -17,8 +17,10 @@ osascript_quote() {
 fail() {
   local msg="$1"
   mkdir -p "$(dirname "${GP_LAST_ERROR}")" "$(dirname "${GP_ERROR_LOG}")"
-  printf '%s\n' "$msg" >"${GP_LAST_ERROR}"
-  printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$msg" >>"${GP_ERROR_LOG}"
+  local at
+  at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '%s\n%s\n' "$at" "$msg" >"${GP_LAST_ERROR}"
+  printf '%s %s\n' "$at" "$msg" >>"${GP_ERROR_LOG}"
   progress_fail "$msg"
   local short
   short="$(printf '%s' "$msg" | tr '\n' ' ')"

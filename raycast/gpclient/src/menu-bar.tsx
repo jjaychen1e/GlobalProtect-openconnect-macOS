@@ -25,6 +25,7 @@ import {
   notifyFailure,
   openInConsole,
   prefs,
+  formatWhen,
   readLastError,
   readLogGroups,
   reconnect,
@@ -309,9 +310,12 @@ export default function Command() {
         {lastError ? (
           <MenuBarExtra.Item
             title="Copy last error"
+            subtitle={formatWhen(lastError.at)}
             icon={Icon.Warning}
             onAction={() => {
-              Clipboard.copy(lastError);
+              Clipboard.copy(
+                `${formatWhen(lastError.at)}\n${lastError.message}`,
+              );
               showHUD("Copied last error");
             }}
           />
