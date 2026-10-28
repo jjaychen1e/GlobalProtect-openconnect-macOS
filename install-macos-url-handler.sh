@@ -70,8 +70,8 @@ fi
 echo "Creating AppleScript handler..."
 cat > "$TEMP_SCRIPT" << EOF
 -- GlobalProtect URL Handler
--- This script handles globalprotectcallback1: URLs. `gpauth auth-callback`
--- passes each one to the `gpauth --browser default` that is waiting for it.
+-- This script handles globalprotectcallback1: URLs. "gpauth auth-callback"
+-- passes each one to the "gpauth --browser default" that is waiting for it.
 
 on open location urlString
     -- Log the received URL for debugging
