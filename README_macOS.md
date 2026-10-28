@@ -24,11 +24,16 @@ Apple Silicon Homebrew prefix is `/opt/homebrew`. Intel is `/usr/local`.
 PREFIX="$(brew --prefix)"
 sudo cp target/release/gpclient target/release/gpauth target/release/gpservice "$PREFIX/bin/"
 
+mkdir -p "$PREFIX/lib/gpclient"
+cp "$(sh scripts/macos-openconnect-library.sh target/release/gpclient)" "$PREFIX/lib/gpclient/"
+
 sudo mkdir -p /usr/local/libexec/gpclient
 sudo cp packaging/files/usr/libexec/gpclient/vpnc-script /usr/local/libexec/gpclient/vpnc-script
 sudo cp packaging/files/usr/libexec/gpclient/hipreport.sh /usr/local/libexec/gpclient/hipreport.sh
 sudo chmod +x /usr/local/libexec/gpclient/vpnc-script /usr/local/libexec/gpclient/hipreport.sh
 ```
+
+`gpclient` and `gpservice` load `libopenconnect.5.dylib` from `$PREFIX/lib/gpclient/`. This library is built from the `crates/openconnect/deps/openconnect` submodule; Homebrew's `openconnect` lacks functions they call. Copy it again after every rebuild. Without it, `gpclient` uses the copy in this checkout's `target/` folder, then fails with `Library not loaded: @rpath/libopenconnect.5.dylib` once that folder is cleaned or deleted.
 
 `vpnc-script` and `hipreport.sh` go under `/usr/local/libexec/gpclient/` because that is the first path the client searches on every architecture.
 
