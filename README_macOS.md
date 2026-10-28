@@ -40,6 +40,14 @@ sudo chmod +x /usr/local/libexec/gpclient/vpnc-script /usr/local/libexec/gpclien
 
 This registers `globalprotectcallback1://` and forwards the URL to `gpclient launch-gui`. Re-run the script after you move `gpclient`.
 
+The portal's success page still sends `globalprotectcallback:` (no `1`) to the official client, and the token in it expires 60 seconds after that page loads. Install the Tampermonkey script so Chrome opens `globalprotectcallback1:` instead:
+
+1. In Chrome, click the Tampermonkey icon → **Create a new script**. Replace the template with the contents of [`userscripts/globalprotect-callback1.user.js`](userscripts/globalprotect-callback1.user.js) and press Cmd+S. On macOS, `pbcopy < userscripts/globalprotect-callback1.user.js` puts the file on the clipboard.
+2. Open `chrome://extensions` → Tampermonkey → **Details** and turn on **Allow User Scripts**. Without it, Tampermonkey saves the script but Chrome does not run it.
+3. On the first sign-in after that, Chrome asks whether to open GlobalProtectURLHandler. Tick **Always allow** for the portal, then click **Open**. Later sign-ins open it without asking.
+
+The script runs only on `https://*/SAML20/SP/ACS*`. It puts a bar at the top of that page with a link to the `globalprotectcallback1:` URL and the seconds left on the token. If gpclient did not receive the callback, click that link.
+
 ## 4. Connect
 
 You must pass `--gateway` unless you want the client to list gateways and then fail with `Failed to initialize input reader`.
