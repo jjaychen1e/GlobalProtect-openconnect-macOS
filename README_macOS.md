@@ -38,7 +38,7 @@ sudo chmod +x /usr/local/libexec/gpclient/vpnc-script /usr/local/libexec/gpclien
 ./install-macos-url-handler.sh
 ```
 
-This registers `globalprotectcallback1://` and forwards the URL to `gpclient launch-gui`. Re-run the script after you move `gpclient`.
+This installs `/Applications/GlobalProtectURLHandler.app` for `globalprotectcallback1:`. The app runs `gpauth auth-callback <url>`, which hands the URL to the `gpauth --browser default` that is waiting for it. Re-run the script after you move `gpauth`; rebuilding it in place needs no re-run.
 
 The portal's success page still sends `globalprotectcallback:` (no `1`) to the official client, and the token in it expires 60 seconds after that page loads. Install the Tampermonkey script so Chrome opens `globalprotectcallback1:` instead:
 
@@ -63,6 +63,8 @@ gpauth <your_portal> --browser default 2>/dev/null | sudo gpclient connect <your
 ```
 
 Do not pass `--os-version`. Both binaries report the real macOS version. Upstream treats `--os-version` as deprecated and ignores it.
+
+Without `-s`, upstream configures routes and DNS itself on macOS and does not run `vpnc-script`. With `-s`, it runs the script you give it.
 
 ## 5. Reconnect without the browser
 
@@ -101,7 +103,8 @@ For everyday use from a menu bar:
 - Root writes the cookie cache, so it is chowned to the owner of its directory; otherwise a user-level tool cannot read it.
 - `session.pid` and `session.json` are written next to the cookie, user-readable, so a menu bar can see a root tunnel and its expiry without `sudo`.
 - `disconnect` escalates SIGINT to SIGTERM to SIGKILL and cleans up stale PID files.
-- `launch-gui` and `status` are allowed while a tunnel is up, so the URL handler can still feed an SSO callback to a waiting `gpauth`.
+- `gpauth auth-callback <url>` is built on macOS too; upstream builds it only on Linux and BSD. The URL handler from step 3 calls it.
+- `gpauth` does not make "GP Connect Login.app" the default handler for the callback scheme. Upstream does that on every browser sign-in and fails when the app is missing.
 - `connect --no-auth-prompt` exits with `Sign-in required …` instead of opening `gpauth`'s login window or asking for a password. Without it, a reconnect whose cached cookie is rejected, or a tunnel that drops later, opens that window on its own.
 
 Note that a second `gpclient` process is killed immediately while a tunnel is up, so `gpclient disconnect` cannot be used to stop a running tunnel from another process; `raycast/gpclient/gp-disconnect.sh` signals the PID directly instead.

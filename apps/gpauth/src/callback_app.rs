@@ -33,7 +33,7 @@ pub fn run() -> anyhow::Result<()> {
     };
     let Some(callback) = urls
       .into_iter()
-      .find(|url| url.scheme().eq_ignore_ascii_case("globalprotectcallback"))
+      .find(|url| url.scheme().eq_ignore_ascii_case(common::constants::GP_CALLBACK_SCHEME))
     else {
       return;
     };

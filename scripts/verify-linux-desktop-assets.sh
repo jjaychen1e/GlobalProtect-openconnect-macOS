@@ -115,19 +115,19 @@ verify_contains \
   "Exec=/usr/bin/gpclient launch-gui %u"
 verify_contains \
   "$GPGUI_APP_DIR/gpgui.desktop.in" \
-  "MimeType=x-scheme-handler/globalprotectcallback;"
+  "MimeType=x-scheme-handler/globalprotectcallback1;"
 verify_contains \
   "$GP_DIR/packaging/files/usr/share/applications/gpgui.desktop" \
   "Exec=/usr/bin/gpclient launch-gui %u"
 verify_contains \
   "$GP_DIR/packaging/files/usr/share/applications/gpgui.desktop" \
-  "MimeType=x-scheme-handler/globalprotectcallback;"
+  "MimeType=x-scheme-handler/globalprotectcallback1;"
 verify_contains \
   "$GP_DIR/packaging/bsd/gpgui.desktop" \
   "Exec=/usr/local/bin/gpclient launch-gui %u"
 verify_contains \
   "$GP_DIR/packaging/bsd/gpgui.desktop" \
-  "MimeType=x-scheme-handler/globalprotectcallback;"
+  "MimeType=x-scheme-handler/globalprotectcallback1;"
 verify_absent "$GPGUI_APP_DIR/gpauth.desktop"
 verify_absent "$GP_DIR/packaging/files/usr/share/applications/gpauth.desktop"
 verify_absent "$GP_DIR/packaging/bsd/gpauth.desktop"

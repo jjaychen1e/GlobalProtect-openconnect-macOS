@@ -21,7 +21,7 @@ use std::ffi::OsStr;
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
 use std::process::{Command, Output};
 
-const CALLBACK_SCHEME: &str = "globalprotectcallback";
+const CALLBACK_SCHEME: &str = common::constants::GP_CALLBACK_SCHEME;
 const PROTOCOL_MAGIC: &[u8; 4] = b"GPAC";
 const PROTOCOL_VERSION: u8 = 1;
 const MAX_CALLBACK_SIZE: usize = 1024 * 1024;
@@ -32,8 +32,8 @@ const STATUS_ACCEPTED: u8 = 0;
 const STATUS_INVALID_CALLBACK: u8 = 1;
 const STATUS_UNSUPPORTED_VERSION: u8 = 2;
 
-#[cfg(target_os = "macos")]
-mod macos;
+// `callback/macos.rs` (makes "GP Connect Login.app" the default handler) is not
+// built: this fork keeps its own URL handler app. See ensure_auth_callback_handler.
 
 pub struct AuthCallbackReceiver {
   listener: UnixListener,
@@ -108,26 +108,26 @@ pub async fn forward_auth_callback(callback: &str) -> anyhow::Result<()> {
 
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
 pub fn ensure_auth_callback_handler() -> anyhow::Result<()> {
-  const MIME_TYPE: &str = "x-scheme-handler/globalprotectcallback";
+  let mime_type = format!("x-scheme-handler/{CALLBACK_SCHEME}");
   const HANDLER: &str = "gpgui.desktop";
 
   ensure_lxqt_mime_tool()?;
 
-  let current_handler = query_callback_handler(MIME_TYPE)?;
+  let current_handler = query_callback_handler(&mime_type)?;
   if !should_register_handler(&current_handler) {
     return Ok(());
   }
 
   let output = Command::new("xdg-mime")
-    .args(["default", HANDLER, MIME_TYPE])
+    .args(["default", HANDLER, &mime_type])
     .output()
     .context("xdg-mime is required for external-browser authentication")?;
   if !output.status.success() {
     log_command_failure("register callback handler", &output);
-    bail!("Failed to register the globalprotectcallback URL handler");
+    bail!("Failed to register the {CALLBACK_SCHEME} URL handler");
   }
-  if query_callback_handler(MIME_TYPE)? != HANDLER {
-    bail!("The globalprotectcallback URL handler registration did not take effect");
+  if query_callback_handler(&mime_type)? != HANDLER {
+    bail!("The {CALLBACK_SCHEME} URL handler registration did not take effect");
   }
 
   Ok(())
@@ -141,7 +141,7 @@ fn query_callback_handler(mime_type: &str) -> anyhow::Result<String> {
     .context("xdg-mime is required for external-browser authentication")?;
   if !output.status.success() {
     log_command_failure("query callback handler", &output);
-    bail!("Failed to query the globalprotectcallback URL handler");
+    bail!("Failed to query the {CALLBACK_SCHEME} URL handler");
   }
   Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -184,9 +184,13 @@ fn log_command_failure(action: &str, output: &Output) {
   warn!("xdg-mime failed to {action} with {}: {}", output.status, stderr.trim());
 }
 
+/// Nothing to register on macOS. `install-macos-url-handler.sh` installs
+/// GlobalProtectURLHandler.app for `globalprotectcallback1:`, and that app runs
+/// `gpauth auth-callback <url>`. Upstream would instead make "GP Connect
+/// Login.app" the default handler here and fail when that bundle is missing.
 #[cfg(target_os = "macos")]
 pub fn ensure_auth_callback_handler() -> anyhow::Result<()> {
-  macos::ensure_auth_callback_handler()
+  Ok(())
 }
 
 #[cfg(not(any(
@@ -376,14 +380,14 @@ mod tests {
 
   use super::*;
 
-  const VALID_CALLBACK: &str = "globalprotectcallback:cas-as=1&un=alice@example.com&token=very_long_string";
+  const VALID_CALLBACK: &str = "globalprotectcallback1:cas-as=1&un=alice@example.com&token=very_long_string";
 
   #[test]
   fn validates_supported_callback_scheme() {
     assert!(validate_callback(VALID_CALLBACK).is_ok());
     assert!(validate_callback("https://example.com").is_err());
-    assert!(validate_callback("globalprotectcallback:").is_err());
-    assert!(validate_callback(&format!("globalprotectcallback:{}", "x".repeat(MAX_CALLBACK_SIZE))).is_err());
+    assert!(validate_callback("globalprotectcallback1:").is_err());
+    assert!(validate_callback(&format!("globalprotectcallback1:{}", "x".repeat(MAX_CALLBACK_SIZE))).is_err());
   }
 
   #[test]
@@ -430,7 +434,7 @@ mod tests {
     let socket_path = directory.path().join("callback.sock");
     let receiver = AuthCallbackReceiver::bind_at(socket_path.clone()).unwrap();
     let failure = gpapi::utils::base64::encode(b"<html><saml-auth-status>0</saml-auth-status></html>");
-    let callback = format!("globalprotectcallback:{failure}");
+    let callback = format!("globalprotectcallback1:{failure}");
     let sender = tokio::spawn(async move { forward_auth_callback_to(&callback, &socket_path).await });
 
     let error = timeout(Duration::from_millis(500), receiver.receive())
@@ -454,7 +458,7 @@ mod tests {
         STATUS_INVALID_CALLBACK
       );
       assert_eq!(
-        send_raw_callback(&socket_path, PROTOCOL_VERSION, "globalprotectcallback:not-base64").await,
+        send_raw_callback(&socket_path, PROTOCOL_VERSION, "globalprotectcallback1:not-base64").await,
         STATUS_INVALID_CALLBACK
       );
       assert_eq!(

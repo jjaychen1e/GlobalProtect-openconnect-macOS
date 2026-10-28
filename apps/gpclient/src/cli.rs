@@ -463,7 +463,7 @@ mod tests {
     let cli = Cli::try_parse_from([
       "gpclient",
       "launch-gui",
-      "globalprotectcallback:cas-as=1&un=alice@example.com&token=token",
+      "globalprotectcallback1:cas-as=1&un=alice@example.com&token=token",
     ])
     .expect("authentication callback should parse");
 
@@ -477,7 +477,7 @@ mod tests {
   #[test]
   #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
   fn launch_gui_rejects_callback_with_minimized() {
-    assert!(Cli::try_parse_from(["gpclient", "launch-gui", "globalprotectcallback:token", "--minimized",]).is_err());
+    assert!(Cli::try_parse_from(["gpclient", "launch-gui", "globalprotectcallback1:token", "--minimized",]).is_err());
   }
 
   #[test]

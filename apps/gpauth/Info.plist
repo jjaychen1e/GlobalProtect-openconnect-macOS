@@ -11,7 +11,7 @@
       <string>GlobalProtect authentication callback</string>
       <key>CFBundleURLSchemes</key>
       <array>
-        <string>globalprotectcallback</string>
+        <string>globalprotectcallback1</string>
       </array>
     </dict>
   </array>

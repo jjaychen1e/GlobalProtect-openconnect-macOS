@@ -16,14 +16,14 @@ APP_PATH="/Applications/${APP_NAME}.app"
 URL_SCHEME="globalprotectcallback1"
 TEMP_SCRIPT="/tmp/gpclient-url-handler.applescript"
 
-# Resolve gpclient: Homebrew ARM, Homebrew Intel, then PATH.
-resolve_gpclient_path() {
-    if [ -x /opt/homebrew/bin/gpclient ]; then
-        echo /opt/homebrew/bin/gpclient
-    elif [ -x /usr/local/bin/gpclient ]; then
-        echo /usr/local/bin/gpclient
-    elif command -v gpclient >/dev/null 2>&1; then
-        command -v gpclient
+# Resolve gpauth: Homebrew ARM, Homebrew Intel, then PATH.
+resolve_gpauth_path() {
+    if [ -x /opt/homebrew/bin/gpauth ]; then
+        echo /opt/homebrew/bin/gpauth
+    elif [ -x /usr/local/bin/gpauth ]; then
+        echo /usr/local/bin/gpauth
+    elif command -v gpauth >/dev/null 2>&1; then
+        command -v gpauth
     else
         return 1
     fi
@@ -32,17 +32,17 @@ resolve_gpclient_path() {
 echo -e "${GREEN}GlobalProtect URL Handler Installer for macOS${NC}"
 echo "============================================="
 
-if ! GPCLIENT_PATH="$(resolve_gpclient_path)"; then
-    echo -e "${YELLOW}Warning: gpclient not found in Homebrew prefixes or PATH${NC}"
-    echo "Please specify the correct path to gpclient:"
-    read -r GPCLIENT_PATH
-    if [ ! -x "$GPCLIENT_PATH" ]; then
-        echo -e "${RED}Error: gpclient not found at $GPCLIENT_PATH${NC}"
+if ! GPAUTH_PATH="$(resolve_gpauth_path)"; then
+    echo -e "${YELLOW}Warning: gpauth not found in Homebrew prefixes or PATH${NC}"
+    echo "Please specify the correct path to gpauth:"
+    read -r GPAUTH_PATH
+    if [ ! -x "$GPAUTH_PATH" ]; then
+        echo -e "${RED}Error: gpauth not found at $GPAUTH_PATH${NC}"
         exit 1
     fi
 fi
 
-echo "Using gpclient at: $GPCLIENT_PATH"
+echo "Using gpauth at: $GPAUTH_PATH"
 
 # Check if we have write permissions to /Applications
 if [ ! -w "/Applications" ]; then
@@ -62,7 +62,8 @@ fi
 echo "Creating AppleScript handler..."
 cat > "$TEMP_SCRIPT" << EOF
 -- GlobalProtect URL Handler
--- This script handles globalprotectcallback1:// URLs and passes them to gpclient
+-- This script handles globalprotectcallback1: URLs. `gpauth auth-callback`
+-- passes each one to the `gpauth --browser default` that is waiting for it.
 
 on open location urlString
     -- Log the received URL for debugging
@@ -79,9 +80,9 @@ on open location urlString
         end try
     end try
 
-    -- Launch gpclient with the URL
+    -- Hand the URL to the waiting gpauth
     try
-        do shell script "$GPCLIENT_PATH launch-gui " & quoted form of urlString
+        do shell script "$GPAUTH_PATH auth-callback " & quoted form of urlString
     on error errMsg
         -- Log any errors
         try
@@ -95,7 +96,7 @@ on open location urlString
         end try
 
         -- Show error to user
-        display dialog "Error launching GlobalProtect client: " & errMsg buttons {"OK"} default button "OK" with icon stop
+        display dialog "gpauth did not take the sign-in callback. Is a sign-in waiting? " & errMsg buttons {"OK"} default button "OK" with icon stop
     end try
 end open location
 
@@ -167,8 +168,8 @@ else
     echo -e "${YELLOW}⚠ Could not verify registration. You may need to restart or log out/in.${NC}"
 fi
 
-# Create uninstall script next to gpclient when possible
-UNINSTALL_DIR="$(dirname "$GPCLIENT_PATH")"
+# Create uninstall script next to gpauth when possible
+UNINSTALL_DIR="$(dirname "$GPAUTH_PATH")"
 UNINSTALL_SCRIPT="${UNINSTALL_DIR}/uninstall-gp-url-handler"
 echo "Creating uninstall script at $UNINSTALL_SCRIPT..."
 cat > "$UNINSTALL_SCRIPT" << 'UNINSTALL_EOF'
@@ -188,4 +189,5 @@ echo -e "To uninstall, run: ${YELLOW}sudo $UNINSTALL_SCRIPT${NC}"
 echo -e "\n${YELLOW}Note:${NC} You may need to log out and back in for the URL handler to be fully recognized."
 echo -e "\nTo test the handler, you can run:"
 echo -e "  ${GREEN}open 'globalprotectcallback1:test'${NC}"
-echo -e "\nThis should create a log entry in /tmp/gpclient-url-handler.log"
+echo -e "\nThis should create a log entry in /tmp/gpclient-url-handler.log."
+echo "With no sign-in waiting, gpauth then reports an error, which is expected."

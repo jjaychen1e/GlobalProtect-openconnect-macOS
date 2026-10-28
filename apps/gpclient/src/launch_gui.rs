@@ -110,9 +110,9 @@ fn ensure_auth_callback_succeeded(status: ExitStatus) -> anyhow::Result<()> {
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd", test))]
 fn parse_auth_callback(callback: &str) -> Result<String, String> {
   callback
-    .starts_with("globalprotectcallback:")
+    .starts_with(&format!("{}:", common::constants::GP_CALLBACK_SCHEME))
     .then(|| callback.to_owned())
-    .ok_or_else(|| "callback URL must use the globalprotectcallback scheme".to_owned())
+    .ok_or_else(|| format!("callback URL must use the {} scheme", common::constants::GP_CALLBACK_SCHEME))
 }
 
 async fn try_active_gui() -> anyhow::Result<()> {
@@ -142,7 +142,7 @@ mod tests {
 
   use super::*;
 
-  const CALLBACK: &str = "globalprotectcallback:cas-as=1&un=alice@example.com&token=token";
+  const CALLBACK: &str = "globalprotectcallback1:cas-as=1&un=alice@example.com&token=token";
 
   #[test]
   fn callback_command_preserves_callback_argument() {

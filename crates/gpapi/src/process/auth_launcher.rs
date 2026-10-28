@@ -347,7 +347,7 @@ impl<'a> SamlAuthLauncher<'a> {
   }
 }
 
-/// `gpauth --browser manual` reads the pasted `globalprotectcallback:` data from the user's terminal.
+/// `gpauth --browser manual` reads the pasted `globalprotectcallback1:` data from the user's terminal.
 fn auth_stdin(browser: Option<&str>) -> ChildInput<'static> {
   match browser {
     Some(browser) if browser.eq_ignore_ascii_case("manual") || browser.eq_ignore_ascii_case("remote") => {
