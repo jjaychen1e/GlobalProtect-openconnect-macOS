@@ -85,6 +85,7 @@ For the SSO callback:
 
 - The callback scheme is `globalprotectcallback1`, so it cannot collide with the official Palo Alto client, which owns `globalprotectcallback`.
 - `gpauth` rewrites `globalprotectcallback:` to `globalprotectcallback1:` in the SAML HTML it serves. If the identity provider's final redirect still omits the `1`, add it in the address bar.
+- The portal's success page (`https://<portal>/SAML20/SP/ACS`) is not served by `gpauth`, so it still sends `globalprotectcallback:` to the official client. Its CAS token expires 60 seconds after that page loads. Install [`userscripts/globalprotect-callback1.user.js`](userscripts/globalprotect-callback1.user.js) in Tampermonkey: it rewrites the page to `globalprotectcallback1:` before Chrome follows it, and shows a link plus the seconds left in case Chrome does not open it.
 
 For everyday use from a menu bar:
 
