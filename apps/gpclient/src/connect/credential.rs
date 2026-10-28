@@ -54,6 +54,10 @@ impl ConnectHandler<'_> {
       return self.read_cookie_from_stdin();
     }
 
+    if self.args.no_auth_prompt {
+      bail!(auth_prompt_disabled_message(server));
+    }
+
     let is_gateway = prelogin.is_gateway();
 
     match prelogin {
@@ -195,6 +199,18 @@ pub(super) fn skip_portal_prelogin(cookie_on_stdin: bool) -> bool {
   cookie_on_stdin
 }
 
+/// Leading text of the `--no-auth-prompt` error. The Raycast progress watcher
+/// matches it in the connect log, so keep it stable.
+const AUTH_PROMPT_DISABLED: &str = "Sign-in required";
+
+/// Error text for a login that `--no-auth-prompt` stopped before it opened a
+/// SAML window or a password prompt for `server`.
+fn auth_prompt_disabled_message(server: &str) -> String {
+  format!(
+    "{AUTH_PROMPT_DISABLED} for {server}: the cached or stdin cookie was not accepted, and --no-auth-prompt blocks a new login. Run gpauth again."
+  )
+}
+
 fn can_use_external_browser_auth(
   saml_support_default_browser: bool,
   is_gateway: bool,
@@ -274,6 +290,14 @@ mod tests {
   fn gateway_saml_requires_gateway_browser_auth_allowance() {
     assert!(!can_use_external_browser_auth(true, true, false));
     assert!(can_use_external_browser_auth(true, true, true));
+  }
+
+  #[test]
+  fn auth_prompt_disabled_message_starts_with_marker_and_names_server() {
+    let message = auth_prompt_disabled_message("gw.example.com");
+
+    assert!(message.starts_with(AUTH_PROMPT_DISABLED));
+    assert!(message.contains("gw.example.com"));
   }
 
   #[test]

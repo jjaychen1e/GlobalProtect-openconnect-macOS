@@ -146,6 +146,12 @@ pub(crate) struct ConnectArgs {
     num_args=0..=1
   )]
   pub(super) browser: Option<String>,
+
+  #[arg(
+    long,
+    help = "Exit with an error instead of opening a login window or asking for a password when the cached or stdin cookie is not accepted"
+  )]
+  pub(super) no_auth_prompt: bool,
 }
 
 pub(super) fn build_os_profile(args: &ConnectArgs) -> OsProfile {
@@ -220,6 +226,18 @@ mod tests {
 
     assert!(cli.args.auto_gateway);
     assert!(cli.args.gateway.is_none());
+  }
+
+  #[test]
+  fn no_auth_prompt_flag_defaults_off_and_parses() {
+    use clap::Parser;
+
+    let default = ConnectArgsTestCli::try_parse_from(["test", "portal.example.com"]).expect("should parse");
+    assert!(!default.args.no_auth_prompt);
+
+    let cli = ConnectArgsTestCli::try_parse_from(["test", "portal.example.com", "--no-auth-prompt"])
+      .expect("--no-auth-prompt should parse");
+    assert!(cli.args.no_auth_prompt);
   }
 
   #[test]

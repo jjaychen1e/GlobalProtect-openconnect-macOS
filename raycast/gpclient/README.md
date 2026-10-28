@@ -35,6 +35,8 @@ Then use **Sign in with SSO** in VPN Status or the menu once, so a cookie exists
 
 Use **Sign in with SSO** in VPN Status or the menu. The browser opens immediately; the launcher does not wait. After SSO, macOS may ask for an admin password once to start the tunnel. Do not add `--os-version`.
 
+Sign in with SSO is the only way this extension logs in. Reconnect, Switch Gateway, Tunnel Mode, and Sign in with SSO all pass `--no-auth-prompt` to `gpclient connect`, so when the gateway rejects the cookie they fail with `Sign-in required` instead of opening `gpauth`'s login window.
+
 This is not only a first-time step. The gateway sets an absolute session expiry (`user_expires`) at sign-in and, when the portal sets `allow_extend_session=false`, nothing renews it — reconnecting reuses the same session. VPN Status and the menu show remaining time; when it runs out, sign in again.
 
 ## Progress

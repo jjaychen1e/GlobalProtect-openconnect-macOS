@@ -98,7 +98,14 @@ FATAL_LOG_MARKERS = (
     "a password is required",
     "no tty present",
     "Failed to connect to the gateway",
+    # gpclient --no-auth-prompt refused to open a login window.
+    "Sign-in required",
 )
+
+# What to do next, appended to the matching marker in the progress error.
+FATAL_HINTS = {
+    "Sign-in required": "The saved cookie was rejected. Use Sign in with SSO.",
+}
 
 
 def read_log(log_path: str, offset: int) -> str:
@@ -142,7 +149,8 @@ def watch(
             return
         fatal = next((m for m in FATAL_LOG_MARKERS if m in log), None)
         if fatal:
-            fail(data, f"gpclient: {fatal}")
+            hint = FATAL_HINTS.get(fatal)
+            fail(data, f"gpclient: {fatal}. {hint}" if hint else f"gpclient: {fatal}")
             save(progress_path, data)
             return
         if changed:

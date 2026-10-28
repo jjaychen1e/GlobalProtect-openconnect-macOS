@@ -93,5 +93,6 @@ For everyday use from a menu bar:
 - `session.pid` and `session.json` are written next to the cookie, user-readable, so a menu bar can see a root tunnel and its expiry without `sudo`.
 - `disconnect` escalates SIGINT to SIGTERM to SIGKILL and cleans up stale PID files.
 - `launch-gui` and `status` are allowed while a tunnel is up, so the URL handler can still feed an SSO callback to a waiting `gpauth`.
+- `connect --no-auth-prompt` exits with `Sign-in required …` instead of opening `gpauth`'s login window or asking for a password. Without it, a reconnect whose cached cookie is rejected, or a tunnel that drops later, opens that window on its own.
 
 Note that a second `gpclient` process is killed immediately while a tunnel is up, so `gpclient disconnect` cannot be used to stop a running tunnel from another process; `raycast/gpclient/gp-disconnect.sh` signals the PID directly instead.

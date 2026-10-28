@@ -349,7 +349,8 @@ impl ConnectHandler<'_> {
   }
 
   fn print_direct_gateway_recommendation(&self, gateway: &str) {
-    if !self.args.cookie_on_stdin {
+    // The suggested direct gateway login needs a new SSO, which --no-auth-prompt blocks.
+    if !self.args.cookie_on_stdin || self.args.no_auth_prompt {
       return;
     }
 

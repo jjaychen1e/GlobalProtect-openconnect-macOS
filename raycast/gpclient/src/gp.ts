@@ -481,7 +481,7 @@ export function firstLoginCommand(values = prefs()): string {
   const slice = tunnelMode() === "full" ? "" : vpnSliceArg();
   const gpauth = gpauthBin();
   const gpclient = gpclientBin();
-  return `${gpauth} ${values.portal} --browser default 2>/dev/null | sudo ${gpclient} connect ${values.portal} --cookie-on-stdin --gateway ${values.gateway} --no-dtls --csc no --cookie-cache ${JSON.stringify(cookiePath(values))}${slice ? ` -s ${JSON.stringify(slice)}` : ""}`;
+  return `${gpauth} ${values.portal} --browser default 2>/dev/null | sudo ${gpclient} connect ${values.portal} --cookie-on-stdin --gateway ${values.gateway} --no-dtls --csc no --no-auth-prompt --cookie-cache ${JSON.stringify(cookiePath(values))}${slice ? ` -s ${JSON.stringify(slice)}` : ""}`;
 }
 
 /** Homebrew ARM first. Do not fall back to `/usr/local/bin` (old 2.4.5). */
@@ -821,6 +821,9 @@ export function reconnect(gateway?: string): void {
     "--no-dtls",
     "--gateway",
     target,
+    // Fail with "Sign-in required" instead of opening gpauth's login window
+    // when the gateway rejects the cached cookie or a running tunnel drops.
+    "--no-auth-prompt",
   ];
   const slice = tunnelMode() === "full" ? "" : vpnSliceArg();
   if (slice) {

@@ -101,6 +101,9 @@ connect_args=(
   --csc no
   --no-dtls
   --cookie-cache "${GP_COOKIE}"
+  # Fail instead of opening gpauth's login window if the gateway rejects the
+  # portal cookie; the browser SSO above is the only login path.
+  --no-auth-prompt
 )
 if [ -n "$GP_SLICE" ]; then
   connect_args+=(-s "$GP_SLICE")
