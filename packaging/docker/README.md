@@ -3,7 +3,7 @@
 This image provides the GlobalProtect-openconnect command-line tools on Alpine Linux. It includes:
 
 - `gpclient` - connect to and disconnect from GlobalProtect VPN portals and gateways
-- `gpauth` - complete authentication separately and pipe the result into `gpclient`
+- `gpauth` - authentication helper used by `gpclient`
 
 The image does not include embedded webview authentication, `gpgui-helper`, or the graphical `gpgui` application.
 
@@ -22,15 +22,15 @@ VPN tunnel creation requires access to `/dev/net/tun` and the `NET_ADMIN` capabi
 ```bash
 docker run --rm -it --cap-add=NET_ADMIN --device=/dev/net/tun \
   yuezk/globalprotect-openconnect:<version> \
-  connect <portal> --cookie-on-stdin
+  connect <portal>
 ```
 
-For browser authentication in a headless environment, use remote browser authentication:
+For browser authentication in a headless environment, use manual browser authentication:
 
 ```bash
 docker run --rm -it --cap-add=NET_ADMIN --device=/dev/net/tun \
   yuezk/globalprotect-openconnect:<version> \
-  connect <portal> --browser remote
+  connect <portal> --browser manual
 ```
 
 On a Linux host, add host networking if the VPN routes should affect the host network namespace:
@@ -38,20 +38,10 @@ On a Linux host, add host networking if the VPN routes should affect the host ne
 ```bash
 docker run --rm -it --network host --cap-add=NET_ADMIN --device=/dev/net/tun \
   yuezk/globalprotect-openconnect:<version> \
-  connect <portal> --browser remote
+  connect <portal> --browser manual
 ```
 
 Without `--network host`, the VPN connection stays inside the container network namespace. Docker Desktop on macOS and Windows does not make the host use the VPN through `--network host`; run `gpclient` on the host or use a container gateway setup for host traffic.
-
-You can also run `gpauth` separately and pipe its remote-browser output into `gpclient`:
-
-```bash
-docker run --rm -it --entrypoint gpauth yuezk/globalprotect-openconnect:<version> \
-  <portal> --browser remote 2>/dev/null \
-  | docker run --rm -i --cap-add=NET_ADMIN --device=/dev/net/tun \
-      yuezk/globalprotect-openconnect:<version> \
-      connect <portal> --cookie-on-stdin
-```
 
 ## Common commands
 

@@ -1,4 +1,5 @@
 #include <openconnect.h>
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,13 +8,48 @@
 
 #include "vpn.h"
 
-void *g_user_data;
+struct vpn_context {
+	struct openconnect_info *vpninfo;
+	int command_fd;
+	const vpn_options *options;
+	vpn_connected_callback on_connected;
+};
 
-static int g_cmd_pipe_fd;
-static const char *g_vpnc_script;
-static const char *g_vpnc_interface;
-static int g_script_tun;
-static vpn_connected_callback on_vpn_connected;
+static int resolve_gateway(void *private_data, const char *node, const char *service,
+			   const struct addrinfo *hints, struct addrinfo **result)
+{
+	struct vpn_context *context = private_data;
+	return vpn_resolve_gateway(node, service, hints, result,
+		context->options->gateway_ip_preference);
+}
+
+static void observe_configuration(struct vpn_context *context)
+{
+	const struct oc_ip_info *info = NULL;
+	if (openconnect_get_ip_info(context->vpninfo, &info, NULL, NULL))
+		info = NULL;
+	vpn_tunnel_configuration(context->options->user_data,
+		context->options->script_tun ? NULL : openconnect_get_ifname(context->vpninfo), info);
+}
+
+static void observe_reconnected(void *private_data)
+{
+	struct vpn_context *context = private_data;
+	observe_configuration(context);
+	vpn_tunnel_event(context->options->user_data, VPN_TUNNEL_RECONNECTED);
+}
+
+static void observe_tunnel(void *private_data, enum openconnect_tunnel_event event)
+{
+	struct vpn_context *context = private_data;
+	vpn_tunnel_event(context->options->user_data, event);
+}
+
+static void observe_statistics(void *private_data, const struct oc_stats *stats)
+{
+	struct vpn_context *context = private_data;
+	vpn_tunnel_statistics(context->options->user_data, stats);
+}
 
 /* Validate the peer certificate */
 static int validate_peer_cert(__attribute__((unused)) void *_vpninfo,
@@ -40,17 +76,28 @@ static void print_progress(__attribute__((unused)) void *_vpninfo, int level,
 	}
 }
 
-static void setup_tun_handler(void *_vpninfo)
+static void setup_tun_handler(void *private_data)
 {
+	struct vpn_context *context = private_data;
+	struct openconnect_info *_vpninfo = context->vpninfo;
+	const vpn_options *options = context->options;
 	int ret;
-	if (g_script_tun) {
-		ret = openconnect_setup_tun_script(_vpninfo, g_vpnc_script);
+	if (options->script_tun) {
+		const struct openconnect_script_tun_launch *launch = options->script_tun_launch;
+		if (launch) {
+			ret = openconnect_setup_tun_script_exec(_vpninfo, launch);
+			vpn_script_started(options->user_data);
+		} else {
+			ret = openconnect_setup_tun_script(_vpninfo, options->script);
+		}
 	} else {
-		ret = openconnect_setup_tun_device(_vpninfo, g_vpnc_script,
-						   g_vpnc_interface);
+		ret = openconnect_setup_tun_device(_vpninfo, options->script,
+						   options->interface);
 	}
 
 	if (!ret) {
+		observe_configuration(context);
+		vpn_tunnel_event(options->user_data, VPN_TUNNEL_ESTABLISHED);
 		vpn_session_info session_info = {
 			.auth_expiration = (long)openconnect_get_auth_expiration(_vpninfo),
 			.lifetime_secs = openconnect_get_gp_session_lifetime(_vpninfo),
@@ -59,8 +106,11 @@ static void setup_tun_handler(void *_vpninfo)
 			    openconnect_get_gp_lifetime_notify_prior(_vpninfo),
 			.lifetime_warning_message =
 			    openconnect_get_gp_lifetime_notify_message(_vpninfo),
+			.nlb_enabled = openconnect_get_gp_nlb_enabled(_vpninfo),
+			.nlb_connected_gw_ip =
+			    openconnect_get_gp_nlb_connected_gw_ip(_vpninfo),
 		};
-		on_vpn_connected(g_cmd_pipe_fd, &session_info, g_user_data);
+		context->on_connected(context->command_fd, &session_info, options->user_data);
 	}
 }
 
@@ -71,40 +121,64 @@ int vpn_connect(const vpn_options *options, vpn_connected_callback callback)
 	struct utsname utsbuf;
 	const char *effective_local_hostname = NULL;
 
-	g_user_data = options->user_data;
-	g_vpnc_script = options->script;
-	g_vpnc_interface = options->interface;
-	g_script_tun = options->script_tun;
-	on_vpn_connected = callback;
+	struct vpn_context context = { .options = options, .on_connected = callback };
+	int result = 1;
 
 	INFO("USER_AGENT: %s", options->user_agent);
 	INFO("OS: %s", options->os);
 	INFO("CLIENT_VERSION: %s", options->client_version);
 	INFO("HOST_ID: %s", options->host_id ? options->host_id : "(not set)");
-	INFO("VPNC_SCRIPT: %s", options->script);
-	INFO("SCRIPT_TUN: %d", g_script_tun);
-	INFO("CSD_USER: %d", options->csd_uid);
-	INFO("CSD_WRAPPER: %s", options->csd_wrapper);
+	const char *configuration = options->script;
+	if (options->configure_network)
+		configuration = "callback";
+	else if (options->script_tun_launch)
+		configuration = options->script_tun_launch->program;
+	INFO("Network configuration: %s", configuration);
+	INFO("SCRIPT_TUN: %d", options->script_tun);
+	INFO("CSD_USER: %d", options->hip_script.uid);
+	INFO("CSD_WRAPPER: %s", options->hip_script.path);
 	INFO("RECONNECT_TIMEOUT: %d", options->reconnect_timeout);
 	INFO("MTU: %d", options->mtu);
 	INFO("DISABLE_IPV6: %d", options->disable_ipv6);
+	INFO("GATEWAY_IP_PREFERENCE: %d", options->gateway_ip_preference);
 	INFO("NO_DTLS: %d", options->no_dtls);
 	INFO("DPD_INTERVAL: %d", options->dpd_interval);
 	INFO("NO_XMLPOST: %d", options->no_xmlpost);
 
 	vpninfo =
 	    openconnect_vpninfo_new(options->user_agent, validate_peer_cert,
-				    NULL, NULL, print_progress, NULL);
+				    NULL, NULL, print_progress, &context);
 
 	if (!vpninfo) {
 		ERROR("openconnect_vpninfo_new failed");
+		vpn_tunnel_event(options->user_data, VPN_TUNNEL_ENDED);
 		return 1;
+	}
+
+	context.vpninfo = vpninfo;
+	openconnect_set_tunnel_handler(vpninfo, observe_tunnel);
+	openconnect_set_reconnected_handler(vpninfo, observe_reconnected);
+	openconnect_set_stats_handler(vpninfo, observe_statistics);
+	openconnect_set_gp_hip_report_callback(vpninfo, options->user_data,
+					options->on_hip_report_submitted);
+	context.command_fd = openconnect_setup_cmd_pipe(vpninfo);
+	if (context.command_fd < 0) {
+		ERROR("openconnect_setup_cmd_pipe failed");
+		goto cleanup;
+	}
+	/* An earlier disconnect remains latched on this attempt. */
+	if (vpn_attach_command_pipe(options->user_data, context.command_fd)) {
+		INFO("VPN attempt canceled before startup");
+		result = -EINTR;
+		goto cleanup;
 	}
 
 	openconnect_set_loglevel(vpninfo, PRG_TRACE);
 	openconnect_init_ssl();
 	openconnect_set_protocol(vpninfo, "gp");
 	openconnect_parse_url(vpninfo, options->server);
+	if (options->gateway_ip_preference)
+		openconnect_override_getaddrinfo(vpninfo, resolve_gateway);
 	openconnect_set_cookie(vpninfo, options->cookie);
 	openconnect_set_useragent(vpninfo, options->user_agent);
 
@@ -150,9 +224,14 @@ int vpn_connect(const vpn_options *options, vpn_connected_callback callback)
 		openconnect_set_xmlpost(vpninfo, 0);
 	}
 
-	if (options->csd_wrapper) {
-		openconnect_setup_csd(vpninfo, options->csd_uid, 1,
-				      options->csd_wrapper);
+	openconnect_set_gp_hip_generator(vpninfo, options->user_data, options->generate_hip);
+	if (options->hip_script.path) {
+		result = openconnect_set_gp_hip_script(vpninfo, options->hip_script.path,
+			options->hip_script.uid_present, options->hip_script.uid,
+			options->hip_script.validation_data, options->hip_script.validate,
+			options->hip_script.environment, options->hip_script.cwd);
+		if (result)
+			goto cleanup;
 	}
 
 	if (options->mtu > 0) {
@@ -167,24 +246,19 @@ int vpn_connect(const vpn_options *options, vpn_connected_callback callback)
 	if (options->dpd_interval > 0) {
 		openconnect_set_dpd(vpninfo, options->dpd_interval);
 	}
-
-	g_cmd_pipe_fd = openconnect_setup_cmd_pipe(vpninfo);
-	if (g_cmd_pipe_fd < 0) {
-		ERROR("openconnect_setup_cmd_pipe failed");
-		return 1;
-	}
-
 	// Essential step
+	vpn_tunnel_event(options->user_data, OC_TUNNEL_NEGOTIATING);
 	if (openconnect_make_cstp_connection(vpninfo) != 0) {
 		ERROR("openconnect_make_cstp_connection failed");
-		return 1;
+		goto cleanup;
 	}
 
 	if (options->no_dtls || openconnect_setup_dtls(vpninfo, 60) != 0) {
 		openconnect_disable_dtls(vpninfo);
 	}
-
 	// Essential step
+	openconnect_set_configure_tun_handler(vpninfo, options->user_data,
+					     options->configure_network);
 	openconnect_set_setup_tun_handler(vpninfo, setup_tun_handler);
 
 	while (1) {
@@ -193,23 +267,54 @@ int vpn_connect(const vpn_options *options, vpn_connected_callback callback)
 
 		if (ret) {
 			INFO("openconnect_mainloop returned %d, exiting", ret);
-			openconnect_vpninfo_free(vpninfo);
-			return ret;
+			result = ret;
+			goto cleanup;
 		}
 
 		INFO("openconnect_mainloop returned 0, reconnecting");
 	}
+cleanup:
+	vpn_detach_command_pipe(options->user_data);
+	openconnect_set_tunnel_handler(vpninfo, NULL);
+	openconnect_vpninfo_free(vpninfo);
+	vpn_tunnel_event(options->user_data, VPN_TUNNEL_ENDED);
+	return result;
 }
 
-/* Stop the VPN connection */
-void vpn_disconnect()
+/* Called with the attempt cancellation mutex held, never after detach/free. */
+int vpn_write_cancel(int fd)
 {
-	char cmd = OC_CMD_CANCEL;
+	char command = OC_CMD_CANCEL;
+	ssize_t written;
+	do {
+		written = write(fd, &command, 1);
+	} while (written < 0 && errno == EINTR);
+	return written == 1 ? 0 : (written < 0 ? errno : EIO);
+}
 
-	INFO("Stopping VPN connection: %d", g_cmd_pipe_fd);
+int vpn_write_statistics(int fd)
+{
+	char command = OC_CMD_STATS;
+	ssize_t written;
+	do {
+		written = write(fd, &command, 1);
+	} while (written < 0 && errno == EINTR);
+	return written == 1 ? 0 : (written < 0 ? errno : EIO);
+}
 
-	if (write(g_cmd_pipe_fd, &cmd, 1) < 0) {
-		ERROR("Failed to write to command pipe, VPN connection may not "
-		      "be stopped");
-	}
+int vpn_collect_hip_report(const vpn_hip_script *script,
+	const struct openconnect_gp_hip_request *request,
+	const struct openconnect_gp_hip_control *control, openconnect_gp_hip_generate_fn generate, void *data,
+	char *output, size_t capacity, size_t *written)
+{
+	struct openconnect_info *vpninfo = openconnect_vpninfo_new("HIP preview", NULL, NULL, NULL, print_progress, NULL);
+	int result;
+	if (!vpninfo)
+		return -ENOMEM;
+	openconnect_set_gp_hip_generator(vpninfo, data, generate);
+	result = openconnect_set_gp_hip_script(vpninfo, script->path, script->uid_present,
+		script->uid, script->validation_data, script->validate, script->environment, script->cwd);
+	if (!result) result = openconnect_collect_gp_hip_report(vpninfo, request, control, output, capacity, written);
+	openconnect_vpninfo_free(vpninfo);
+	return result;
 }

@@ -1,5 +1,8 @@
 use thiserror::Error;
 
+mod server_tls;
+pub use server_tls::{ServerTlsError, ServerTlsErrorKind};
+
 #[derive(Error, Debug)]
 pub enum PortalError {
   #[error("Prelogin error: {0}")]
@@ -10,18 +13,14 @@ pub enum PortalError {
 
   #[error(transparent)]
   NetworkError(#[from] reqwest::Error),
-
-  #[error("TLS error")]
-  TlsError,
 }
 
 impl PortalError {
-  pub fn is_legacy_openssl_error(&self) -> bool {
-    format!("{:?}", self).contains("unsafe legacy renegotiation")
-  }
-
-  pub fn is_tls_error(&self) -> bool {
-    matches!(self, PortalError::TlsError) || format!("{:?}", self).contains("certificate verify failed")
+  fn tls_error_kind(&self) -> Option<ServerTlsErrorKind> {
+    match self {
+      Self::NetworkError(error) => server_tls::classify(error),
+      _ => None,
+    }
   }
 }
 
@@ -29,12 +28,17 @@ impl PortalError {
 pub enum AuthDataParseError {
   #[error("No auth data found")]
   NotFound,
+  #[error("Authentication failed (SAML status: {0})")]
+  AuthenticationFailed(String),
   #[error(transparent)]
   Invalid(#[from] anyhow::Error),
 }
 
 impl AuthDataParseError {
   pub fn is_invalid(&self) -> bool {
-    matches!(self, AuthDataParseError::Invalid(_))
+    matches!(
+      self,
+      AuthDataParseError::Invalid(_) | AuthDataParseError::AuthenticationFailed(_)
+    )
   }
 }

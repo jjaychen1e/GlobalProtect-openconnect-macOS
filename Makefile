@@ -3,8 +3,10 @@ SHELL := /bin/sh
 
 INCLUDE_GUI ?= 0
 CARGO ?= cargo
+CARGO_TARGET_DIR ?= target
+CARGO_RELEASE_DIR ?= $(CARGO_TARGET_DIR)/$(if $(CARGO_BUILD_TARGET),$(CARGO_BUILD_TARGET)/)release
 DISABLE_RUST_TOOLCHAIN ?= 0
-RUST_VERSION ?= 1.89
+RUST_VERSION ?= 1.91
 IGNORE_RUST_VERSION ?= 0
 
 VERSION = $(shell grep '^version' Cargo.toml | head -1 | sed 's/version *= *"\(.*\)"/\1/')
@@ -33,7 +35,14 @@ BUILD_GUI_HELPER ?= 1
 
 # Indicates whether to build embedded webview auth support into gpauth
 BUILD_WEBVIEW_AUTH ?= 1
+ifeq ($(shell uname -s),Linux)
+PREFIX ?= /usr
+GPGUI_BINARY ?= $(wildcard .build/gpgui/gpgui_*/gpgui)
+else ifeq ($(shell uname -s)-$(shell uname -m),Darwin-arm64)
+PREFIX ?= /opt/homebrew
+else
 PREFIX ?= /usr/local
+endif
 BSD_FLAVOR ?= $(shell uname -s | tr '[:upper:]' '[:lower:]')
 GPGUI_BINARY ?= ../gpgui/target/release/gpgui
 
@@ -63,6 +72,9 @@ ifeq ($(IGNORE_RUST_VERSION), 1)
 endif
 
 default: build
+
+dev-service:
+	./scripts/dev-service.sh
 
 version:
 	@echo $(VERSION)
@@ -136,68 +148,74 @@ clean:
 	rm -rf .vendor
 	rm -rf apps/gpgui-helper/node_modules
 
-install:
-	@echo "Installing $(PKG_NAME)..."
+ifeq ($(shell uname -s),Darwin)
+install: install-macos
+install-gpclient: install-gpclient-macos
+else ifneq ($(filter FreeBSD OpenBSD,$(shell uname -s)),)
+install: install-bsd
+install-gpclient: install-gpclient-unix
+else
+install: install-linux
+install-gpclient: install-gpclient-unix
+endif
 
-	install -Dm755 target/release/gpclient $(DESTDIR)/usr/bin/gpclient
-	install -Dm755 target/release/gpauth $(DESTDIR)/usr/bin/gpauth
-	install -Dm755 target/release/gpservice $(DESTDIR)/usr/bin/gpservice
+install-gpclient-unix:
+	install -d "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(PREFIX)/libexec/gpclient"
+	install -m 755 "$(CARGO_RELEASE_DIR)/gpclient" "$(DESTDIR)$(PREFIX)/bin/"
+	install -m 755 packaging/files/usr/libexec/gpclient/vpnc-script "$(DESTDIR)$(PREFIX)/libexec/gpclient/"
 
-	# Install the GUI components if BUILD_GUI_HELPER is set to 1
-	if [ $(BUILD_GUI_HELPER) -eq 1 ]; then \
-		install -Dm755 target/release/gpgui-helper $(DESTDIR)/usr/bin/gpgui-helper; \
+install-gpclient-macos:
+	install -d "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(PREFIX)/lib/gpclient" "$(DESTDIR)$(PREFIX)/libexec/gpclient"
+	install -m 755 "$(CARGO_RELEASE_DIR)/gpclient" "$(DESTDIR)$(PREFIX)/bin/"
+	set -e; library=$$(sh scripts/macos-openconnect-library.sh "$(CARGO_RELEASE_DIR)/gpclient"); \
+		install -m 755 "$$library" "$(DESTDIR)$(PREFIX)/lib/gpclient/"; \
+		install_name_tool -delete_rpath "$$(dirname "$$library")" "$(DESTDIR)$(PREFIX)/bin/gpclient"; \
+		codesign --force --sign - "$(DESTDIR)$(PREFIX)/bin/gpclient"
+	install -m 755 packaging/files/usr/libexec/gpclient/vpnc-script "$(DESTDIR)$(PREFIX)/libexec/gpclient/"
+
+install-macos: install-gpclient-macos
+	install -m 755 "$(CARGO_RELEASE_DIR)/gpauth" "$(DESTDIR)$(PREFIX)/bin/"
+
+# Common executable and icon installation uses portable install options on Linux/BSD.
+install-unix: install-gpclient-unix
+	set -e; for binary in gpauth gpservice; do \
+		install -m 755 "$(CARGO_RELEASE_DIR)/$$binary" "$(DESTDIR)$(PREFIX)/bin/"; \
+	done
+	set -e; for binary in gp-hip-script-installer gp-vpnc-script-installer; do \
+		install -m 755 "$(CARGO_RELEASE_DIR)/$$binary" "$(DESTDIR)$(PREFIX)/libexec/gpclient/"; \
+	done
+	set -e; if [ "$(BUILD_GUI_HELPER)" = "1" ]; then \
+		install -m 755 "$(CARGO_RELEASE_DIR)/gpgui-helper" "$(DESTDIR)$(PREFIX)/bin/"; \
 	fi
-
-	if [ -f .build/gpgui/gpgui_*/gpgui ]; then \
-		install -Dm755 .build/gpgui/gpgui_*/gpgui $(DESTDIR)/usr/bin/gpgui; \
+	set -e; if [ -f "$(GPGUI_BINARY)" ]; then \
+		install -m 755 "$(GPGUI_BINARY)" "$(DESTDIR)$(PREFIX)/bin/gpgui"; \
 	fi
+	set -e; for file in packaging/files/usr/share/icons/hicolor/*/apps/gpgui.* \
+		packaging/files/usr/share/icons/hicolor/scalable/status/gpgui-*.svg; do \
+		destination="$(DESTDIR)$(PREFIX)/$${file#packaging/files/usr/}"; \
+		install -d "$$(dirname "$$destination")"; \
+		install -m 644 "$$file" "$$destination"; \
+	done
 
-	install -Dm755 packaging/files/usr/libexec/gpclient/vpnc-script $(DESTDIR)/usr/libexec/gpclient/vpnc-script
-	install -Dm755 packaging/files/usr/libexec/gpclient/hipreport.sh $(DESTDIR)/usr/libexec/gpclient/hipreport.sh
+install-linux: install-unix
+	@echo "Installing Linux integration under $(PREFIX)..."
+	set -e; for file in share/applications/gpgui.desktop \
+		share/polkit-1/actions/com.yuezk.gpgui.policy \
+		lib/NetworkManager/dispatcher.d/pre-down.d/gpclient.down \
+		lib/NetworkManager/dispatcher.d/gpclient-nm-hook; do \
+		mode=644; case "$$file" in lib/*) mode=755 ;; esac; \
+		destination="$(DESTDIR)$(PREFIX)/$$file"; \
+		install -d "$$(dirname "$$destination")"; \
+		install -m "$$mode" "packaging/files/usr/$$file" "$$destination"; \
+	done
+	sh scripts/relocate-install-paths.sh "$(PREFIX)" /usr "$(DESTDIR)$(PREFIX)"
 
-	# Install the disconnect hooks
-	install -Dm755 packaging/files/usr/lib/NetworkManager/dispatcher.d/pre-down.d/gpclient.down $(DESTDIR)/usr/lib/NetworkManager/dispatcher.d/pre-down.d/gpclient.down
-	install -Dm755 packaging/files/usr/lib/NetworkManager/dispatcher.d/gpclient-nm-hook $(DESTDIR)/usr/lib/NetworkManager/dispatcher.d/gpclient-nm-hook
-
-	install -Dm644 packaging/files/usr/share/applications/gpgui.desktop $(DESTDIR)/usr/share/applications/gpgui.desktop
-	install -Dm644 packaging/files/usr/share/icons/hicolor/scalable/apps/gpgui.svg $(DESTDIR)/usr/share/icons/hicolor/scalable/apps/gpgui.svg
-	install -Dm644 packaging/files/usr/share/icons/hicolor/32x32/apps/gpgui.png $(DESTDIR)/usr/share/icons/hicolor/32x32/apps/gpgui.png
-	install -Dm644 packaging/files/usr/share/icons/hicolor/128x128/apps/gpgui.png $(DESTDIR)/usr/share/icons/hicolor/128x128/apps/gpgui.png
-	install -Dm644 packaging/files/usr/share/icons/hicolor/256x256@2/apps/gpgui.png $(DESTDIR)/usr/share/icons/hicolor/256x256@2/apps/gpgui.png
-	install -Dm644 packaging/files/usr/share/polkit-1/actions/com.yuezk.gpgui.policy $(DESTDIR)/usr/share/polkit-1/actions/com.yuezk.gpgui.policy
-
-install-bsd:
-	@echo "Installing $(PKG_NAME) for BSD under $(PREFIX)..."
-
-	install -d $(DESTDIR)$(PREFIX)/bin
-	install -m 755 target/release/gpclient $(DESTDIR)$(PREFIX)/bin/gpclient
-	install -m 755 target/release/gpauth $(DESTDIR)$(PREFIX)/bin/gpauth
-	install -m 755 target/release/gpservice $(DESTDIR)$(PREFIX)/bin/gpservice
-
-	if [ "$(BUILD_GUI_HELPER)" = "1" ]; then \
-		install -m 755 target/release/gpgui-helper $(DESTDIR)$(PREFIX)/bin/gpgui-helper; \
-	fi
-
-	if [ -x "$(GPGUI_BINARY)" ]; then \
-		install -m 755 "$(GPGUI_BINARY)" $(DESTDIR)$(PREFIX)/bin/gpgui; \
-	fi
-
-	install -d $(DESTDIR)$(PREFIX)/libexec/gpclient
-	install -m 755 packaging/files/usr/libexec/gpclient/vpnc-script $(DESTDIR)$(PREFIX)/libexec/gpclient/vpnc-script
-	install -m 755 packaging/files/usr/libexec/gpclient/hipreport.sh $(DESTDIR)$(PREFIX)/libexec/gpclient/hipreport.sh
-
-	install -d $(DESTDIR)$(PREFIX)/share/applications
-	install -m 644 packaging/bsd/gpgui.desktop $(DESTDIR)$(PREFIX)/share/applications/gpgui.desktop
-	install -d $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps
-	install -d $(DESTDIR)$(PREFIX)/share/icons/hicolor/32x32/apps
-	install -d $(DESTDIR)$(PREFIX)/share/icons/hicolor/128x128/apps
-	install -d $(DESTDIR)$(PREFIX)/share/icons/hicolor/256x256@2/apps
-	install -m 644 packaging/files/usr/share/icons/hicolor/scalable/apps/gpgui.svg $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/gpgui.svg
-	install -m 644 packaging/files/usr/share/icons/hicolor/32x32/apps/gpgui.png $(DESTDIR)$(PREFIX)/share/icons/hicolor/32x32/apps/gpgui.png
-	install -m 644 packaging/files/usr/share/icons/hicolor/128x128/apps/gpgui.png $(DESTDIR)$(PREFIX)/share/icons/hicolor/128x128/apps/gpgui.png
-	install -m 644 packaging/files/usr/share/icons/hicolor/256x256@2/apps/gpgui.png $(DESTDIR)$(PREFIX)/share/icons/hicolor/256x256@2/apps/gpgui.png
-	install -d $(DESTDIR)$(PREFIX)/share/polkit-1/actions
-	install -m 644 packaging/bsd/com.yuezk.gpgui.policy $(DESTDIR)$(PREFIX)/share/polkit-1/actions/com.yuezk.gpgui.policy
+install-bsd: install-unix
+	@echo "Installing BSD integration under $(PREFIX)..."
+	install -d "$(DESTDIR)$(PREFIX)/share/applications" "$(DESTDIR)$(PREFIX)/share/polkit-1/actions"
+	install -m 644 packaging/bsd/gpgui.desktop "$(DESTDIR)$(PREFIX)/share/applications/"
+	install -m 644 packaging/bsd/com.yuezk.gpgui.policy "$(DESTDIR)$(PREFIX)/share/polkit-1/actions/"
+	sh scripts/relocate-install-paths.sh "$(PREFIX)" /usr/local "$(DESTDIR)$(PREFIX)"
 
 clean-bsd-package:
 	rm -rf .build/$(BSD_FLAVOR)
@@ -216,7 +234,7 @@ bsd-gpgui-tarball:
 package-freebsd: BSD_FLAVOR=freebsd
 package-freebsd: clean-bsd-package
 	test -x "$(GPGUI_BINARY)"
-	mkdir -p .build/freebsd/pkgroot .build/freebsd/artifacts
+	mkdir -p .build/freebsd/pkgroot .build/freebsd/artifacts .build/freebsd/metadata
 	$(MAKE) install-bsd DESTDIR=$(CURDIR)/.build/freebsd/pkgroot PREFIX=$(PREFIX) GPGUI_BINARY="$(GPGUI_BINARY)"
 	find .build/freebsd/pkgroot$(PREFIX) -type f -print | sed 's|^.build/freebsd/pkgroot$(PREFIX)/||' | sort > .build/freebsd/PLIST
 	freebsd_major=$$(freebsd-version -u | sed 's/\..*//'); \
@@ -227,8 +245,9 @@ package-freebsd: clean-bsd-package
 		-e "s/@ABI@/FreeBSD:$$freebsd_major:$$freebsd_arch/g" \
 		-e "s/@ARCH@/freebsd:$$freebsd_major:$$freebsd_arch/g" \
 		-e 's|@PREFIX@|$(PREFIX)|g' \
-		packaging/bsd/freebsd/MANIFEST.in > .build/freebsd/+MANIFEST
-	pkg create -r .build/freebsd/pkgroot -M .build/freebsd/+MANIFEST -p .build/freebsd/PLIST -o .build/freebsd/artifacts
+		packaging/bsd/freebsd/MANIFEST.in > .build/freebsd/metadata/+MANIFEST
+	cp packaging/bsd/freebsd/POST_DEINSTALL .build/freebsd/metadata/+POST_DEINSTALL
+	pkg create -r .build/freebsd/pkgroot -M .build/freebsd/metadata -p .build/freebsd/PLIST -o .build/freebsd/artifacts
 	freebsd_arch=$$(uname -m | sed -e 's/x86_64/amd64/' -e 's/arm64/aarch64/'); \
 		mv .build/freebsd/artifacts/$(PKG_NAME)-$(VERSION).pkg .build/freebsd/artifacts/$(PKG_NAME)-$(VERSION)-freebsd-$$freebsd_arch.pkg
 	$(MAKE) bsd-gpgui-tarball BSD_FLAVOR=freebsd GPGUI_BINARY="$(GPGUI_BINARY)"
@@ -240,12 +259,20 @@ package-openbsd: clean-bsd-package
 	$(MAKE) install-bsd DESTDIR=$(CURDIR)/.build/openbsd/pkgroot PREFIX=$(PREFIX) GPGUI_BINARY="$(GPGUI_BINARY)"
 	cp packaging/bsd/openbsd/COMMENT .build/openbsd/+COMMENT
 	cp packaging/bsd/openbsd/DESC .build/openbsd/+DESC
-	find .build/openbsd/pkgroot$(PREFIX) -type f -print | sed 's|^.build/openbsd/pkgroot$(PREFIX)/||' | sort > .build/openbsd/PLIST
+	{ \
+		echo '@unexec-delete /bin/rm -f /usr/local/libexec/gpclient/gpgui /var/db/gpclient/scripts/vpnc-script /var/db/gpclient/scripts/vpnc-script.metadata || echo "Warning: failed to remove gpclient runtime files" >&2'; \
+		echo '@unexec-delete /bin/rmdir /usr/local/libexec/gpclient 2>/dev/null || true'; \
+		echo '@unexec-delete /bin/rmdir /var/db/gpclient/scripts 2>/dev/null || true'; \
+		echo '@unexec-delete /bin/rmdir /var/db/gpclient 2>/dev/null || true'; \
+		find .build/openbsd/pkgroot$(PREFIX) -type f -print | sed 's|^.build/openbsd/pkgroot$(PREFIX)/||' | sort; \
+	} > .build/openbsd/PLIST
 	comment=$$(cat .build/openbsd/+COMMENT); \
 		openbsd_arch=$$(uname -m | sed 's/x86_64/amd64/'); \
 		gnome_keyring_pkg=$$(pkg_info -e 'gnome-keyring-*' | sed 's/^inst://' | head -n 1); \
+		dbus_pkg=$$(pkg_info -e 'dbus-*' | sed 's/^inst://' | head -n 1); \
 		polkit_pkg=$$(pkg_info -e 'polkit-*' | sed 's/^inst://' | head -n 1); \
 		webkitgtk_pkg=$$(pkg_info -e 'webkitgtk41-*' | sed 's/^inst://' | head -n 1); \
+		xdg_utils_pkg=$$(pkg_info -e 'xdg-utils-*' | sed 's/^inst://' | head -n 1); \
 		pkg_create \
 			-B .build/openbsd/pkgroot \
 			-D COMMENT="$$comment" \
@@ -253,32 +280,61 @@ package-openbsd: clean-bsd-package
 			-f .build/openbsd/PLIST \
 			-p $(PREFIX) \
 			-P x11/gnome/keyring:gnome-keyring-*:$$gnome_keyring_pkg \
+			-P x11/dbus:dbus-*:$$dbus_pkg \
 			-P sysutils/polkit:polkit-*:$$polkit_pkg \
 			-P www/webkitgtk4,webkitgtk41:webkitgtk41-*:$$webkitgtk_pkg \
+			-P devel/xdg-utils:xdg-utils-*:$$xdg_utils_pkg \
 			.build/openbsd/artifacts/$(PKG_NAME)-$(VERSION)-openbsd-$$openbsd_arch.tgz
 	$(MAKE) bsd-gpgui-tarball BSD_FLAVOR=openbsd GPGUI_BINARY="$(GPGUI_BINARY)"
 
-uninstall:
-	@echo "Uninstalling $(PKG_NAME)..."
+ifeq ($(shell uname -s),Darwin)
+uninstall: uninstall-macos
+else ifneq ($(filter FreeBSD OpenBSD,$(shell uname -s)),)
+uninstall: uninstall-bsd
+else
+uninstall: uninstall-linux
+endif
 
-	rm -f $(DESTDIR)/usr/bin/gpclient
-	rm -f $(DESTDIR)/usr/bin/gpauth
-	rm -f $(DESTDIR)/usr/bin/gpservice
-	rm -f $(DESTDIR)/usr/bin/gpgui-helper
-	rm -f $(DESTDIR)/usr/bin/gpgui
+.PHONY: install install-gpclient install-macos install-unix install-linux install-bsd \
+	install-gpclient-macos install-gpclient-unix \
+	uninstall uninstall-macos uninstall-unix uninstall-linux uninstall-bsd
 
-	rm -f $(DESTDIR)/usr/libexec/gpclient/vpnc-script
-	rm -f $(DESTDIR)/usr/libexec/gpclient/hipreport.sh
+uninstall-macos:
+	@echo "Uninstalling $(PKG_NAME) for macOS under $(PREFIX)..."
+	rm -f "$(DESTDIR)$(PREFIX)/bin/gpclient" "$(DESTDIR)$(PREFIX)/bin/gpauth" \
+		"$(DESTDIR)$(PREFIX)/libexec/gpclient/vpnc-script" \
+		"$(DESTDIR)$(PREFIX)/lib/gpclient/"libopenconnect.*.dylib
+	rmdir "$(DESTDIR)$(PREFIX)/lib/gpclient" "$(DESTDIR)$(PREFIX)/libexec/gpclient" 2>/dev/null || true
 
-	rm -f $(DESTDIR)/usr/lib/NetworkManager/dispatcher.d/pre-down.d/gpclient.down
-	rm -f $(DESTDIR)/usr/lib/NetworkManager/dispatcher.d/gpclient-nm-hook
+uninstall-unix:
+	@echo "Uninstalling $(PKG_NAME) under $(PREFIX)..."
+	set -e; for binary in gpclient gpauth gpservice gpgui-helper gpgui; do \
+		rm -f "$(DESTDIR)$(PREFIX)/bin/$$binary"; \
+	done
+	set -e; for file in gp-hip-script-installer gp-vpnc-script-installer vpnc-script; do \
+		rm -f "$(DESTDIR)$(PREFIX)/libexec/gpclient/$$file"; \
+	done
+	set -e; for file in packaging/files/usr/share/icons/hicolor/*/apps/gpgui.* \
+		packaging/files/usr/share/icons/hicolor/scalable/status/gpgui-*.svg; do \
+		rm -f "$(DESTDIR)$(PREFIX)/$${file#packaging/files/usr/}"; \
+	done
+	rm -f "$(DESTDIR)$(PREFIX)/share/applications/gpgui.desktop" \
+		"$(DESTDIR)$(PREFIX)/share/polkit-1/actions/com.yuezk.gpgui.policy"
+	rmdir "$(DESTDIR)$(PREFIX)/libexec/gpclient" 2>/dev/null || true
 
-	rm -f $(DESTDIR)/usr/share/applications/gpgui.desktop
-	rm -f $(DESTDIR)/usr/share/icons/hicolor/scalable/apps/gpgui.svg
-	rm -f $(DESTDIR)/usr/share/icons/hicolor/32x32/apps/gpgui.png
-	rm -f $(DESTDIR)/usr/share/icons/hicolor/128x128/apps/gpgui.png
-	rm -f $(DESTDIR)/usr/share/icons/hicolor/256x256@2/apps/gpgui.png
-	rm -f $(DESTDIR)/usr/share/polkit-1/actions/com.yuezk.gpgui.policy
+uninstall-linux: uninstall-unix
+	rm -f "$(DESTDIR)$(PREFIX)/lib/NetworkManager/dispatcher.d/pre-down.d/gpclient.down" \
+		"$(DESTDIR)$(PREFIX)/lib/NetworkManager/dispatcher.d/gpclient-nm-hook"
+	rm -f "$(DESTDIR)/var/lib/gpclient/gpgui" \
+		"$(DESTDIR)/var/lib/gpclient/scripts/vpnc-script" \
+		"$(DESTDIR)/var/lib/gpclient/scripts/vpnc-script.metadata"
+	rmdir "$(DESTDIR)/var/lib/gpclient/scripts" "$(DESTDIR)/var/lib/gpclient" 2>/dev/null || true
+
+uninstall-bsd: uninstall-unix
+	rm -f "$(DESTDIR)/usr/local/libexec/gpclient/gpgui" \
+		"$(DESTDIR)/var/db/gpclient/scripts/vpnc-script" \
+		"$(DESTDIR)/var/db/gpclient/scripts/vpnc-script.metadata"
+	rmdir "$(DESTDIR)/var/db/gpclient/scripts" "$(DESTDIR)/var/db/gpclient" 2>/dev/null || true
 
 clean-debian:
 	rm -rf .build/deb
@@ -298,18 +354,19 @@ init-debian: clean-debian tarball
 
 	sed -i "s/@RUST_VERSION@/$(RUST_VERSION)/g" .build/deb/$(PKG)/debian/control
 
-	# Remove the GUI dependencies if BUILD_GUI_HELPER is set to 0
-	if [ $(BUILD_GUI_HELPER) -eq 0 ]; then \
+	# Remove the GUI dependencies if neither GUI component is included
+	if [ $(INCLUDE_GUI) -eq 0 ] && [ $(BUILD_GUI_HELPER) -eq 0 ]; then \
 		sed -i "/libsecret-1-0/d" .build/deb/$(PKG)/debian/control; \
 		sed -i "/libayatana-appindicator3-1/d" .build/deb/$(PKG)/debian/control; \
 		sed -i "/gnome-keyring/d" .build/deb/$(PKG)/debian/control; \
 	fi
 
-	# Remove the WebKitGTK build dependency only if neither gpauth webview auth nor gpgui-helper needs it
-	if [ $(BUILD_GUI_HELPER) -eq 0 ] && [ $(BUILD_WEBVIEW_AUTH) -eq 0 ]; then \
+	# Remove WebKitGTK only if no included component needs it
+	if [ $(INCLUDE_GUI) -eq 0 ] && [ $(BUILD_GUI_HELPER) -eq 0 ] && [ $(BUILD_WEBVIEW_AUTH) -eq 0 ]; then \
 		sed -i "/libwebkit2gtk-4.1-dev/d" .build/deb/$(PKG)/debian/control; \
 	fi
 
+	sed -i "s/@INCLUDE_GUI@/$(INCLUDE_GUI)/g" .build/deb/$(PKG)/debian/rules
 	sed -i "s/@BUILD_GUI_HELPER@/$(BUILD_GUI_HELPER)/g" .build/deb/$(PKG)/debian/rules
 	sed -i "s/@BUILD_WEBVIEW_AUTH@/$(BUILD_WEBVIEW_AUTH)/g" .build/deb/$(PKG)/debian/rules
 	sed -i "s/@RUST_VERSION@/$(RUST_VERSION)/g" .build/deb/$(PKG)/debian/rules
@@ -386,6 +443,7 @@ init-pkgbuild: clean-pkgbuild tarball
 
 	cp .build/tarball/${PKG}.tar.gz .build/pkgbuild
 	cp packaging/pkgbuild/PKGBUILD.in .build/pkgbuild/PKGBUILD
+	cp packaging/pkgbuild/gp.install .build/pkgbuild/gp.install
 
 	sed -i "s/@PKG_NAME@/$(PKG_NAME)/g" .build/pkgbuild/PKGBUILD
 	sed -i "s/@VERSION@/$(VERSION)/g" .build/pkgbuild/PKGBUILD
@@ -402,6 +460,7 @@ init-apk: clean-apk tarball
 
 	cp .build/tarball/${PKG}.tar.gz .build/apk
 	cp packaging/apk/APKBUILD.in .build/apk/APKBUILD
+	cp packaging/apk/post-deinstall .build/apk/$(PKG_NAME).post-deinstall
 
 	sed -i "s/@PKG_NAME@/$(PKG_NAME)/g" .build/apk/APKBUILD
 	sed -i "s/@VERSION@/$(VERSION)/g" .build/apk/APKBUILD
@@ -409,14 +468,14 @@ init-apk: clean-apk tarball
 	checksum=$$(sha512sum .build/apk/${PKG}.tar.gz | cut -d' ' -f1); \
 		sed -i "s/@SHA512@/$$checksum/g" .build/apk/APKBUILD
 
-	# Remove the GUI dependencies if BUILD_GUI_HELPER is set to 0
-	if [ $(BUILD_GUI_HELPER) -eq 0 ]; then \
+	# Remove the GUI dependencies if neither GUI component is included
+	if [ $(INCLUDE_GUI) -eq 0 ] && [ $(BUILD_GUI_HELPER) -eq 0 ]; then \
 		sed -i "/^\tlibayatana-appindicator$$/d" .build/apk/APKBUILD; \
 		sed -i "/^\tlibsecret$$/d" .build/apk/APKBUILD; \
 	fi
 
-	# Remove the WebKitGTK dependency only if neither gpauth webview auth nor gpgui-helper needs it
-	if [ $(BUILD_GUI_HELPER) -eq 0 ] && [ $(BUILD_WEBVIEW_AUTH) -eq 0 ]; then \
+	# Remove WebKitGTK only if no included component needs it
+	if [ $(INCLUDE_GUI) -eq 0 ] && [ $(BUILD_GUI_HELPER) -eq 0 ] && [ $(BUILD_WEBVIEW_AUTH) -eq 0 ]; then \
 		sed -i "/^\twebkit2gtk-4.1$$/d" .build/apk/APKBUILD; \
 	fi
 

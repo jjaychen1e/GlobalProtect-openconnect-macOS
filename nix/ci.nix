@@ -1,0 +1,61 @@
+let
+  source = builtins.getEnv "GP_SOURCE";
+  system = builtins.getEnv "NIX_SYSTEM";
+  nixpkgsRef = builtins.getEnv "NIXPKGS";
+  gp = builtins.getFlake ("git+file://" + source + "?submodules=1");
+  nixpkgs = if nixpkgsRef == "locked" then gp.inputs.nixpkgs
+    else builtins.getFlake ("github:NixOS/nixpkgs/" + nixpkgsRef);
+  pkgs = import nixpkgs { inherit system; };
+  unpack = name: variable:
+    let
+      archive = builtins.path {
+        path = builtins.toPath (builtins.getEnv variable);
+        inherit name;
+      };
+    in pkgs.runCommand name { nativeBuildInputs = [ pkgs.libarchive ]; } ''
+      mkdir -p "$out"
+      bsdtar --extract --file ${archive} --directory "$out" --strip-components 1
+    '';
+  binaries = unpack "gp-ci-binaries" "GP_BINARY_ARCHIVE";
+  gui = unpack "gp-ci-gui" "GP_GUI_ARCHIVE";
+  sourcePackage = gp.packages.${system}.fromSource.override { inherit gui; };
+  prebuiltInputs = {
+    inherit binaries gui;
+    version = sourcePackage.version;
+  };
+  prebuiltPackage = gp.packages.${system}.prebuilt.override prebuiltInputs;
+  hostSystem = nixpkgs.lib.nixosSystem {
+    inherit system;
+    modules = [
+      gp.nixosModules.default
+      ({ options, ... }: {
+        programs.globalprotect-openconnect = {
+          enable = true;
+          package = options.programs.globalprotect-openconnect.package.default.override prebuiltInputs;
+        };
+        system.stateVersion = "25.11";
+      })
+    ];
+  };
+  modulePackage = hostSystem.config.programs.globalprotect-openconnect.package;
+in {
+  source = sourcePackage;
+  prebuilt = assert prebuiltPackage.version == sourcePackage.version; prebuiltPackage;
+  module = assert modulePackage.version == sourcePackage.version;
+    assert builtins.elem modulePackage hostSystem.config.environment.systemPackages;
+    assert hostSystem.config.services.ayatana-indicators.enable;
+    assert hostSystem.config.security.polkit.enable;
+    assert hostSystem.config.security.wrappers.pkexec.enable;
+    assert hostSystem.config.security.wrappers.pkexec.setuid;
+    modulePackage;
+  runtime-source = import ./tests/native-runtime.nix {
+    inherit pkgs;
+    package = sourcePackage;
+    module = gp.nixosModules.default;
+  };
+  runtime-prebuilt = import ./tests/native-runtime.nix {
+    inherit pkgs;
+    package = prebuiltPackage;
+    module = gp.nixosModules.default;
+  };
+}

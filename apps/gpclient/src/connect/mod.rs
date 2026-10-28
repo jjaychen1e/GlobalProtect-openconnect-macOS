@@ -1,17 +1,27 @@
 mod args;
 mod credential;
+#[cfg(test)]
+mod flow_tests;
 mod gateway;
+mod internal;
+mod vpn_script;
 
 use std::cell::RefCell;
+use std::sync::{
+  Arc,
+  atomic::{AtomicBool, Ordering},
+};
 
 use anyhow::bail;
 use gpapi::{
   clap::report,
+  credential::Credential,
   error::PortalError,
-  gateway::{GatewayLoginContext, GatewaySelection},
+  gateway::GatewaySelection,
   gp_params::GpParams,
   os_profile::OsProfile,
-  portal::{PreloginOptions, prelogin, retrieve_config},
+  portal::{PortalConfig, Prelogin, PreloginOptions, prelogin, retrieve_config},
+  session::GatewaySessions,
   utils::request::RequestIdentityError,
 };
 use inquire::{Password, PasswordDisplayMode, Select};
@@ -25,6 +35,7 @@ use credential::{CleanAuthState, skip_portal_prelogin};
 use gateway::GatewayConnectError;
 
 pub(crate) struct ConnectHandler<'a> {
+  cancellation: tokio_util::sync::CancellationToken,
   args: &'a ConnectArgs,
   shared_args: &'a SharedArgs<'a>,
   os_profile: RefCell<OsProfile>,
@@ -33,6 +44,12 @@ pub(crate) struct ConnectHandler<'a> {
   cookie_from_stdin: RefCell<Option<String>>,
   clean_auth_state: RefCell<CleanAuthState>,
   portal_gateways: RefCell<Vec<String>>,
+  #[cfg(test)]
+  auth_attempt_fixture: RefCell<credential::AuthAttemptFixture>,
+  auth_recovery: RefCell<gpapi::process::rendering_recovery::RecoveryState>,
+  sessions: RefCell<GatewaySessions>,
+  pid_written: Arc<AtomicBool>,
+  background: Option<crate::background::BackgroundWorker>,
 }
 
 impl<'a> ConnectHandler<'a> {
@@ -45,6 +62,7 @@ impl<'a> ConnectHandler<'a> {
     let clean_auth = false;
 
     Self {
+      cancellation: tokio_util::sync::CancellationToken::new(),
       args,
       shared_args,
       os_profile: RefCell::new(build_os_profile(args)),
@@ -53,7 +71,18 @@ impl<'a> ConnectHandler<'a> {
       cookie_from_stdin: Default::default(),
       clean_auth_state: RefCell::new(CleanAuthState::new(clean_auth)),
       portal_gateways: Default::default(),
+      #[cfg(test)]
+      auth_attempt_fixture: Default::default(),
+      auth_recovery: RefCell::default(),
+      sessions: RefCell::default(),
+      pid_written: Arc::default(),
+      background: None,
     }
+  }
+
+  pub(crate) fn with_background(mut self, background: Option<crate::background::BackgroundWorker>) -> Self {
+    self.background = background;
+    self
   }
 
   fn build_gp_params(&self) -> GpParams {
@@ -95,6 +124,44 @@ impl<'a> ConnectHandler<'a> {
   }
 
   pub(crate) async fn handle(&self) -> anyhow::Result<()> {
+    let cancellation = self.cancellation.clone();
+    let signal = tokio::spawn(async move {
+      gpapi::utils::shutdown_signal().await;
+      cancellation.cancel();
+    });
+    self.auth_recovery.replace(Default::default());
+    let result = self.handle_attempt().await;
+    let sessions = self.sessions.take();
+    if self.args.cookie_only && result.is_ok() {
+      sessions.relinquish();
+    } else {
+      sessions.logout().await;
+    }
+    if self.pid_written.load(Ordering::SeqCst) {
+      if let Err(error) = std::fs::remove_file(self.shared_args.lock_file) {
+        warn!("Failed to remove PID file: {error}");
+      }
+    }
+    signal.abort();
+    let _ = signal.await;
+    result
+  }
+
+  fn check_cancelled(&self) -> anyhow::Result<()> {
+    if self.cancellation.is_cancelled() {
+      Err(gpapi::auth::AuthenticationCancelled.into())
+    } else {
+      Ok(())
+    }
+  }
+
+  async fn handle_attempt(&self) -> anyhow::Result<()> {
+    if self.args.browser_listen.is_some()
+      && !matches!(self.args.browser.as_deref(), Some(browser) if browser.eq_ignore_ascii_case("manual") || browser.eq_ignore_ascii_case("remote"))
+    {
+      bail!("The '--browser-listen' option requires '--browser manual'");
+    }
+
     #[cfg(feature = "webview-auth")]
     if self.args.default_browser && self.args.browser.is_some() {
       bail!("Cannot use `--default-browser` and `--browser` options at the same time");
@@ -103,15 +170,30 @@ impl<'a> ConnectHandler<'a> {
     self.latest_key_password.replace(self.args.key_password.clone());
 
     loop {
-      let Err(err) = self.handle_impl().await else {
+      self.check_cancelled()?;
+      let result = self.handle_impl().await;
+      let Err(err) = self.auth_recovery.borrow().finish(result) else {
         return Ok(());
       };
 
-      let Some(root_cause) = err.root_cause().downcast_ref::<RequestIdentityError>() else {
+      if err
+        .downcast_ref::<gpapi::process::rendering_recovery::RecoveryFailed>()
+        .is_some()
+      {
+        return Err(err);
+      }
+      let Some(identity_error) = err.downcast_ref::<RequestIdentityError>() else {
         return Err(err);
       };
 
-      match root_cause {
+      match identity_error {
+        RequestIdentityError::UnsupportedEncryption
+        | RequestIdentityError::LegacyKeyConversion(_)
+        | RequestIdentityError::UnsupportedKeyFormat
+        | RequestIdentityError::InvalidKey
+        | RequestIdentityError::InvalidCertificate
+        | RequestIdentityError::IncompletePkcs12
+        | RequestIdentityError::InvalidPkcs12(_) => return Err(err),
         RequestIdentityError::NoKey => {
           let format = self.shared_args.log_format;
           report(
@@ -140,6 +222,7 @@ impl<'a> ConnectHandler<'a> {
   }
 
   pub(crate) async fn handle_impl(&self) -> anyhow::Result<()> {
+    self.check_cancelled()?;
     let server = self.args.server.as_str();
     let as_gateway = self.args.as_gateway;
 
@@ -151,15 +234,23 @@ impl<'a> ConnectHandler<'a> {
     }
 
     if !self.args.cookie_on_stdin {
-      if let Some(()) = self.try_cached_cookie(server).await {
-        return Ok(());
+      if let Some(result) = self.try_cached_cookie(server).await {
+        return result;
       }
     }
+    self.check_cancelled()?;
 
     let Err(err) = self.connect_portal_with_prelogin(server).await else {
       return Ok(());
     };
 
+    let err = self.auth_recovery.borrow().terminal(err);
+    if err
+      .downcast_ref::<gpapi::process::rendering_recovery::RecoveryFailed>()
+      .is_some()
+    {
+      return Err(err);
+    }
     warn!("Failed to connect portal with prelogin: {}", err);
     if err.root_cause().downcast_ref::<PortalError>().is_some() {
       info!("Trying the gateway authentication workflow...");
@@ -183,21 +274,62 @@ impl<'a> ConnectHandler<'a> {
     }
   }
 
+  /// Portal prelogin, then a portal config from the cached cookie or, failing
+  /// that, from a new login. Returns the prelogin for its gateway region.
+  async fn portal_credential_with_prelogin(
+    &self,
+    portal: &str,
+    gp_params: &GpParams,
+  ) -> anyhow::Result<(Credential, PortalConfig, Prelogin)> {
+    let mut prelogin = tokio::select! {
+      biased;
+      _ = self.cancellation.cancelled() => return Err(gpapi::auth::AuthenticationCancelled.into()),
+      result = prelogin(portal, gp_params, self.prelogin_options(false)) => result?,
+    };
+
+    let cached = self.cached_portal_credential(portal);
+    let cached_config = match cached {
+      Some(cred) => match retrieve_config(portal, &cred, gp_params, &self.cancellation).await {
+        Ok(config) => Some((cred, config)),
+        Err(error) => {
+          self.check_cancelled()?;
+          warn!("Cached portal authentication failed: {error}");
+          self.clear_cookie_cache();
+          None
+        }
+      },
+      None => None,
+    };
+    let (cred, portal_config) = match cached_config {
+      Some(result) => result,
+      None => {
+        let (replacement, cred) = self
+          .obtain_credential_with_recovery(prelogin.clone(), portal, false)
+          .await?;
+        prelogin = replacement;
+        self.check_cancelled()?;
+        let config = retrieve_config(portal, &cred, gp_params, &self.cancellation).await?;
+        (cred, config)
+      }
+    };
+    Ok((cred, portal_config, prelogin))
+  }
+
   async fn connect_portal_with_prelogin(&self, portal: &str) -> anyhow::Result<()> {
     let gp_params = self.build_gp_params();
 
     // gpauth already ran portal prelogin + SAML. A second prelogin here can
     // invalidate that CAS token and make getconfig return HTTP 512 auth-failed.
-    let (cred, region) = if skip_portal_prelogin(self.args.cookie_on_stdin) {
+    let (cred, mut portal_config, region) = if skip_portal_prelogin(self.args.cookie_on_stdin) {
       info!("Skipping portal prelogin; using --cookie-on-stdin credentials");
-      (self.read_cookie_from_stdin()?, String::new())
+      let cred = self.read_cookie_from_stdin()?;
+      let config = retrieve_config(portal, &cred, &gp_params, &self.cancellation).await?;
+      (cred, config, String::new())
     } else {
-      let prelogin = prelogin(portal, &gp_params, self.prelogin_options(false)).await?;
-      let cred = self.obtain_credential(&prelogin, portal, false).await?;
-      (cred, prelogin.region().to_string())
+      let (cred, config, prelogin) = self.portal_credential_with_prelogin(portal, &gp_params).await?;
+      (cred, config, prelogin.region().to_string())
     };
-
-    let mut portal_config = retrieve_config(portal, &cred, &gp_params).await?;
+    self.check_cancelled()?;
     *self.portal_gateways.borrow_mut() = portal_config.gateway_servers();
 
     if !region.is_empty() {
@@ -208,7 +340,6 @@ impl<'a> ConnectHandler<'a> {
       Some(password) => portal_config.auth_cookie().clone().with_password(password),
       None => portal_config.auth_cookie().clone(),
     };
-    let allow_extend_session = portal_config.allow_extend_session().unwrap_or(false);
     let portal_config_default_browser = portal_config.default_browser().unwrap_or(false);
     info!("Portal config default-browser: {}", portal_config_default_browser);
 
@@ -224,29 +355,27 @@ impl<'a> ConnectHandler<'a> {
       );
 
       let mut last_err: Option<anyhow::Error> = None;
-      for gateway in &gateways {
+      for (index, gateway) in gateways.iter().enumerate() {
         info!("Auto-gateway: attempting gateway {}", gateway);
-        let gateway_context =
-          GatewayLoginContext::new(gateway, GatewaySelection::Auto).with_connect_method(portal_config.connect_method());
-
         match self
           .connect_gateway_with_fallback(
             portal,
-            gateway.server(),
+            gateway,
             &auth_cookie,
-            allow_extend_session,
-            portal_config_default_browser,
-            gateway_context,
+            &portal_config,
+            GatewaySelection::Auto,
+            &gateways[index + 1..],
           )
           .await
         {
           Ok(()) => return Ok(()),
           Err(err) => {
-            if !err.is_before_tunnel() {
-              return Err(err.into_error());
+            self.logout_gateway(gateway.server()).await;
+            if self.auth_recovery.borrow().dmabuf_disabled() || !err.is_before_establishment() {
+              return Err(self.auth_recovery.borrow().terminal(err.into_error()));
             }
             warn!(
-              "Auto-gateway: gateway {} failed before tunnel setup: {}",
+              "Auto-gateway: gateway {} failed before session establishment: {}",
               gateway,
               err.as_error()
             );
@@ -277,6 +406,9 @@ impl<'a> ConnectHandler<'a> {
       None => {
         let gateways = portal_config.gateways();
 
+        if gateways.is_empty() {
+          bail!("No gateways available in portal configuration");
+        }
         if gateways.len() > 1 {
           let gateway = Select::new("Which gateway do you want to connect to?", gateways)
             .with_vim_mode(true)
@@ -290,18 +422,14 @@ impl<'a> ConnectHandler<'a> {
       }
     };
 
-    let gateway = selected_gateway.server();
-    let gateway_context =
-      GatewayLoginContext::new(selected_gateway, gateway_selection).with_connect_method(portal_config.connect_method());
-
     self
       .connect_gateway_with_fallback(
         portal,
-        gateway,
+        selected_gateway,
         &auth_cookie,
-        allow_extend_session,
-        portal_config_default_browser,
-        gateway_context,
+        &portal_config,
+        gateway_selection,
+        &[],
       )
       .await
       .map_err(GatewayConnectError::into_error)

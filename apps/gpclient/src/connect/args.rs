@@ -6,12 +6,33 @@ use gpapi::{
   os_profile::{ClientOs, OsProfile},
 };
 use log::warn;
-use std::path::PathBuf;
+use std::{net::IpAddr, path::PathBuf};
 
 #[derive(Args)]
 pub(crate) struct ConnectArgs {
   #[arg(help = "The portal server to connect to")]
   pub(super) server: String,
+
+  #[arg(
+    long,
+    conflicts_with = "cookie_only",
+    help = "Complete sign-in, then keep the VPN running after this command exits"
+  )]
+  pub(crate) background: bool,
+
+  #[arg(
+    long,
+    conflicts_with_all = ["background", "cookie_only"],
+    help = "Show an interactive connection dashboard after sign-in (requires a foreground terminal)"
+  )]
+  pub(crate) dashboard: bool,
+
+  #[arg(
+    long,
+    requires = "background",
+    help = "Background log file (default: /var/log/gpclient.log)"
+  )]
+  pub(crate) log_file: Option<PathBuf>,
 
   #[arg(short, long, help = "The gateway to connect to, it will prompt if not specified")]
   pub(super) gateway: Option<String>,
@@ -54,13 +75,16 @@ pub(crate) struct ConnectArgs {
 
   #[arg(
     long,
-    help = "Use HIP (Host Integrity Protection) extension, optionally specify the HIP script path",
+    help = "Enable HIP (Host Information Profile), optionally specify a custom executable",
     default_missing_value = "",
     num_args=0..=1
   )]
   pub(super) hip: Option<String>,
 
-  #[arg(long, help = "The user used to run the HIP script")]
+  #[arg(
+    long,
+    help = "Run a custom HIP executable as this user; otherwise inherit the process user"
+  )]
   pub(super) hip_user: Option<String>,
 
   #[arg(
@@ -88,7 +112,15 @@ pub(crate) struct ConnectArgs {
   #[arg(short, long, help = "Request MTU from server (legacy servers only)")]
   pub(super) mtu: Option<u32>,
 
-  #[arg(long, help = "Do not ask for IPv6 connectivity")]
+  #[arg(
+    long,
+    value_enum,
+    default_value = "auto",
+    help = "Choose which IP version to try first when connecting to the gateway"
+  )]
+  pub(super) ip_preference: gpapi::gateway::GatewayIpPreference,
+
+  #[arg(long, help = "Use only IPv4 for traffic inside the VPN tunnel")]
   pub(super) disable_ipv6: bool,
 
   #[arg(long = "user-agent", hide = true)]
@@ -141,7 +173,7 @@ pub(crate) struct ConnectArgs {
 
   #[arg(
     long,
-    help = "Use external browser authentication. With no value, auto-select Chrome, Firefox, then system default. Use `default` for the system default browser or `remote` for headless servers.",
+    help = "Use a browser; omit the value to auto-select. Use `manual` to open the URL and paste the callback.",
     default_missing_value = "auto",
     num_args=0..=1
   )]
@@ -152,6 +184,16 @@ pub(crate) struct ConnectArgs {
     help = "Exit with an error instead of opening a login window or asking for a password when the cached or stdin cookie is not accepted"
   )]
   pub(super) no_auth_prompt: bool,
+  #[arg(long, help = "Listen on this IP address when using '--browser manual'")]
+  pub(super) browser_listen: Option<IpAddr>,
+
+  #[arg(
+    long,
+    help = "Authenticate and print the gateway cookie to stdout, then exit without starting the \
+            VPN tunnel. Outputs two lines: COOKIE='<value>' and HOST='<gateway>'. Combine with \
+            --cookie-cache to avoid re-authenticating when the portal session is still valid."
+  )]
+  pub(super) cookie_only: bool,
 }
 
 pub(super) fn build_os_profile(args: &ConnectArgs) -> OsProfile {
@@ -279,6 +321,23 @@ mod tests {
       .expect("--browser default should parse");
 
     assert_eq!(cli.args.browser.as_deref(), Some("default"));
+  }
+
+  #[test]
+  fn browser_listen_accepts_ip_address() {
+    use clap::Parser;
+
+    let cli = ConnectArgsTestCli::try_parse_from([
+      "test",
+      "portal.example.com",
+      "--browser",
+      "manual",
+      "--browser-listen",
+      "192.168.107.15",
+    ])
+    .expect("connect args should parse");
+
+    assert_eq!(cli.args.browser_listen, Some("192.168.107.15".parse().unwrap()));
   }
 
   #[test]
@@ -415,5 +474,48 @@ mod tests {
       Err(err) => err,
     };
     assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+  }
+
+  #[test]
+  fn cookie_only_flag_parses() {
+    use clap::Parser;
+
+    let cli = ConnectArgsTestCli::try_parse_from(["test", "portal.example.com", "--cookie-only"])
+      .expect("--cookie-only should parse");
+
+    assert!(cli.args.cookie_only);
+  }
+
+  #[test]
+  fn cookie_only_is_disabled_by_default() {
+    use clap::Parser;
+
+    let cli = ConnectArgsTestCli::try_parse_from(["test", "portal.example.com"]).expect("connect args should parse");
+
+    assert!(!cli.args.cookie_only);
+  }
+
+  #[test]
+  fn ip_preference_parses_independently_of_tunnel_ipv6() {
+    use clap::Parser;
+    use gpapi::gateway::GatewayIpPreference;
+    let default = ConnectArgsTestCli::try_parse_from(["test", "portal.example.com"]).unwrap();
+    assert_eq!(default.args.ip_preference, GatewayIpPreference::Auto);
+    for (value, expected) in [
+      ("auto", GatewayIpPreference::Auto),
+      ("ipv4", GatewayIpPreference::Ipv4),
+      ("ipv6", GatewayIpPreference::Ipv6),
+    ] {
+      let cli = ConnectArgsTestCli::try_parse_from([
+        "test",
+        "portal.example.com",
+        "--ip-preference",
+        value,
+        "--disable-ipv6",
+      ])
+      .unwrap();
+      assert_eq!(cli.args.ip_preference, expected);
+      assert!(cli.args.disable_ipv6);
+    }
   }
 }

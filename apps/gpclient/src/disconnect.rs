@@ -1,10 +1,10 @@
-use crate::GP_CLIENT_LOCK_FILE;
 use clap::Args;
 use gpapi::process::users::get_non_root_user;
 use gpapi::utils::lock_file::gpservice_lock_info;
 use log::{info, warn};
 use std::{
   fs,
+  path::Path,
   process::{Command, Stdio},
   str::FromStr,
   thread,
@@ -24,11 +24,12 @@ pub struct DisconnectArgs {
 
 pub struct DisconnectHandler<'a> {
   args: &'a DisconnectArgs,
+  lock_file: &'a Path,
 }
 
 impl<'a> DisconnectHandler<'a> {
-  pub fn new(args: &'a DisconnectArgs) -> Self {
-    Self { args }
+  pub fn new(args: &'a DisconnectArgs, lock_file: &'a Path) -> Self {
+    Self { args, lock_file }
   }
 
   pub async fn handle(&self) -> anyhow::Result<()> {
@@ -36,7 +37,7 @@ impl<'a> DisconnectHandler<'a> {
     let self_pid = std::process::id().to_string();
     let mut pids = Vec::new();
 
-    if let Ok(pid) = fs::read_to_string(GP_CLIENT_LOCK_FILE) {
+    if let Ok(pid) = fs::read_to_string(self.lock_file) {
       pids.push(pid.trim().to_string());
     }
     if let Ok(output) = Command::new("pgrep").args(["-x", "gpclient"]).output() {
@@ -49,20 +50,23 @@ impl<'a> DisconnectHandler<'a> {
     }
 
     let mut seen = std::collections::HashSet::new();
+    let mut cli_signalled = false;
     for pid in pids {
       if pid == self_pid || !seen.insert(pid.clone()) {
         continue;
       }
-      stop_cli_client(&pid, wait_secs)?;
+      cli_signalled |= stop_cli_client(&pid, wait_secs, self.lock_file)?;
     }
 
     if let Ok(path) = user_session_pid_path() {
       let _ = fs::remove_file(path);
     }
 
-    if let Ok(c) = gpservice_lock_info().await {
+    // Try to disconnect the GUI service
+    if !cli_signalled && let Ok(c) = gpservice_lock_info().await {
       send_signal(&c.pid.to_string(), Signal::User1).unwrap_or_else(|err| {
         warn!("Failed to send signal to service: {}", err);
+        false
       });
     }
 
@@ -81,33 +85,34 @@ fn user_session_pid_path() -> anyhow::Result<std::path::PathBuf> {
 
 /// Ask a CLI `gpclient connect` to exit. SIGINT is ignored when the process
 /// was started from osascript (no TTY), so escalate to SIGTERM then SIGKILL.
-fn stop_cli_client(pid: &str, wait_secs: u64) -> anyhow::Result<()> {
+/// Returns false when `pid` was already gone, true when it was signalled.
+fn stop_cli_client(pid: &str, wait_secs: u64, lock_file: &Path) -> anyhow::Result<bool> {
   if pid == std::process::id().to_string() {
     anyhow::bail!("refusing to signal this disconnect process; stale lock file?");
   }
 
   if !process_alive(pid) {
-    let _ = fs::remove_file(GP_CLIENT_LOCK_FILE);
-    return Ok(());
+    let _ = fs::remove_file(lock_file);
+    return Ok(false);
   }
 
   info!("Signaling gpclient PID {pid} with SIGINT");
   send_unix_signal(pid, "INT")?;
   if wait_until_gone(pid, Duration::from_secs(2)) {
-    return Ok(());
+    return Ok(true);
   }
 
   info!("PID {pid} ignored SIGINT, sending SIGTERM");
   send_unix_signal(pid, "TERM")?;
   if wait_until_gone(pid, Duration::from_secs(wait_secs.max(1))) {
-    return Ok(());
+    return Ok(true);
   }
 
   warn!("PID {pid} still alive, sending SIGKILL");
   send_unix_signal(pid, "KILL")?;
   if wait_until_gone(pid, Duration::from_secs(2)) {
-    let _ = fs::remove_file(GP_CLIENT_LOCK_FILE);
-    return Ok(());
+    let _ = fs::remove_file(lock_file);
+    return Ok(true);
   }
 
   anyhow::bail!("gpclient PID {pid} is still running after SIGKILL");
@@ -145,16 +150,14 @@ fn wait_until_gone(pid: &str, timeout: Duration) -> bool {
   !process_alive(pid)
 }
 
-fn send_signal(pid: &str, signal: Signal) -> anyhow::Result<()> {
+fn send_signal(pid: &str, signal: Signal) -> anyhow::Result<bool> {
   let s = System::new_all();
   let pid = Pid::from_str(pid)?;
 
   if let Some(process) = s.process(pid) {
     info!("Found process {}, sending signal...", pid);
 
-    if process.kill_with(signal).is_none() {
-      warn!("Failed to kill process {}", pid);
-    }
+    return Ok(process.kill_with(signal).unwrap_or(false));
   }
-  Ok(())
+  Ok(false)
 }

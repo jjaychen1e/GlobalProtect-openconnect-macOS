@@ -1,0 +1,77 @@
+name: Release infrastructure checks
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+      - 'scripts/record-build-sources.py'
+      - 'scripts/validate-release-version.py'
+      - 'scripts/publish-flake-test-branch.sh'
+      - 'scripts/prepare-release-promotion.sh'
+      - 'scripts/tests/test_release_flow.py'
+      - 'scripts/select-macos-artifact.sh'
+      - 'scripts/test-private-desktop.sh'
+      - 'scripts/tests/test_private_ci.py'
+      - 'scripts/wait-for-publication.py'
+      - 'scripts/select-publication-targets.py'
+      - 'scripts/verify-docker-publication.sh'
+      - 'scripts/tests/test_*publication.py'
+      - 'scripts/validate-macos-release.py'
+      - 'scripts/validate-macos-appcast.py'
+      - 'scripts/validate-update-manifest.py'
+      - 'scripts/tests/test_validate_*.py'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+      - 'scripts/record-build-sources.py'
+      - 'scripts/validate-release-version.py'
+      - 'scripts/publish-flake-test-branch.sh'
+      - 'scripts/prepare-release-promotion.sh'
+      - 'scripts/tests/test_release_flow.py'
+      - 'scripts/select-macos-artifact.sh'
+      - 'scripts/test-private-desktop.sh'
+      - 'scripts/tests/test_private_ci.py'
+      - 'scripts/wait-for-publication.py'
+      - 'scripts/select-publication-targets.py'
+      - 'scripts/verify-docker-publication.sh'
+      - 'scripts/tests/test_*publication.py'
+      - 'scripts/validate-macos-release.py'
+      - 'scripts/validate-macos-appcast.py'
+      - 'scripts/validate-update-manifest.py'
+      - 'scripts/tests/test_validate_*.py'
+
+permissions:
+  contents: read
+
+jobs:
+  release-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate workflow expressions and schema
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 \
+            -shellcheck='' -pyflakes=''
+      - name: Check Docker publication script
+        run: |
+          bash -n scripts/verify-docker-publication.sh
+          shellcheck scripts/verify-docker-publication.sh
+      - name: Test publication verification
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*publication.py'
+      - name: Test macOS publication and update feed validation
+        run: python3 -m unittest discover -s scripts/tests -p 'test_validate_*.py'
+      - name: Check private CI and macOS artifact selection
+        run: |
+          bash -n scripts/select-macos-artifact.sh
+          shellcheck scripts/select-macos-artifact.sh scripts/test-private-desktop.sh
+          bash -n scripts/test-private-desktop.sh
+          python3 -m unittest discover -s scripts/tests -p 'test_private_ci.py'
+      - name: Test release promotion and source selection
+        run: |
+          bash -n scripts/prepare-release-promotion.sh scripts/publish-flake-test-branch.sh
+          shellcheck scripts/prepare-release-promotion.sh scripts/publish-flake-test-branch.sh
+          python3 -m unittest discover -s scripts/tests -p 'test_release_flow.py'

@@ -1,4 +1,7 @@
+mod address_bar;
 mod auth_messenger;
+mod recovery;
+mod tls;
 mod webview_auth;
 
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
@@ -17,4 +20,4 @@ mod platform_impl;
 )))]
 compile_error!("webview-auth is only supported on macOS and GTK/WebKitGTK Unix targets");
 
-pub use webview_auth::WebviewAuthenticator;
+pub use webview_auth::{WebviewAuthenticator, apply_auth_theme};

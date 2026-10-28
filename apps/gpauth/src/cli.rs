@@ -1,15 +1,26 @@
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
+use auth::forward_auth_callback;
 use auth::{BrowserAuthenticator, auth_prelogin};
 use clap::Parser;
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
+use clap::Subcommand;
+#[cfg(feature = "webview-auth")]
+use gpapi::auth::AuthWindowTheme;
+#[cfg(not(target_os = "macos"))]
+use gpapi::utils::openssl;
 use gpapi::{
-  auth::{SamlAuthData, SamlAuthResult},
+  auth::{AuthenticationCancelled, SamlAuthData, SamlAuthResult},
   clap::{Args, InfoLevelVerbosity, args::Os, handle_error},
+  error::ServerTlsError,
   gp_params::GpParams,
-  log_format::{LogFormat, write_json_record},
+  log_format::LogFormat,
   os_profile::{ClientOs, OsProfile},
-  utils::{normalize_server, openssl},
+  utils::normalize_server,
 };
 use log::info;
 use serde_json::json;
+use std::net::IpAddr;
+#[cfg(not(target_os = "macos"))]
 use tempfile::NamedTempFile;
 
 const VERSION: &str = concat!(
@@ -26,6 +37,8 @@ const VERSION: &str = concat!(
   version = VERSION,
   author,
   about = "The authentication component for the GlobalProtect VPN client, supports the SSO authentication method.",
+  args_conflicts_with_subcommands = true,
+  subcommand_negates_reqs = true,
   help_template = "\
 {before-help}{name} {version}
 {author}
@@ -40,8 +53,12 @@ See 'gpauth -h' for more information.
 "
 )]
 struct Cli {
-  #[arg(help = "The portal server to authenticate")]
-  server: String,
+  #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
+  #[command(subcommand)]
+  command: Option<CliCommand>,
+
+  #[arg(required = true, help = "The portal server to authenticate")]
+  server: Option<String>,
 
   #[arg(long, help = "Treating the server as a gateway")]
   gateway: bool,
@@ -71,6 +88,7 @@ struct Cli {
   #[arg(short = 'p', long, help = "The key passphrase of the private key")]
   key_password: Option<String>,
 
+  #[cfg(not(target_os = "macos"))]
   #[arg(long, help = "Get around the OpenSSL `unsafe legacy renegotiation` error")]
   fix_openssl: bool,
 
@@ -91,11 +109,14 @@ struct Cli {
 
   #[arg(
     long,
-    help = "Use external browser authentication. With no value, auto-select Chrome, Firefox, then system default. Use `default` for the system default browser.",
+    help = "Use a browser; omit the value to auto-select. Use `manual` to open the URL and paste the callback.",
     default_missing_value = "auto",
     num_args=0..=1
   )]
   browser: Option<String>,
+
+  #[arg(long, help = "Listen on this IP address when using '--browser manual'")]
+  browser_listen: Option<IpAddr>,
 
   #[cfg(feature = "webview-auth")]
   #[arg(long, help = "The HiDPI mode, useful for high-resolution screens")]
@@ -105,11 +126,30 @@ struct Cli {
   #[arg(long, help = "Clean the cache of the embedded browser")]
   pub clean: bool,
 
+  #[cfg(feature = "webview-auth")]
+  #[arg(long, help = "Set the embedded authentication window title")]
+  window_title: Option<String>,
+
+  #[cfg(feature = "webview-auth")]
+  #[arg(long, value_enum, default_value_t = AuthWindowTheme::default(), help = "Set the embedded authentication window appearance")]
+  window_theme: AuthWindowTheme,
+
   #[command(flatten)]
   verbose: InfoLevelVerbosity,
 }
 
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
+#[derive(Subcommand)]
+enum CliCommand {
+  #[command(hide = true)]
+  AuthCallback {
+    #[arg(help = "The globalprotectcallback URL to forward")]
+    callback: String,
+  },
+}
+
 impl Args for Cli {
+  #[cfg(not(target_os = "macos"))]
   fn fix_openssl(&self) -> bool {
     self.fix_openssl
   }
@@ -124,10 +164,8 @@ impl Args for Cli {
 }
 
 impl Cli {
-  fn prepare_env(&self) -> anyhow::Result<Option<NamedTempFile>> {
-    #[cfg(feature = "webview-auth")]
-    gpapi::utils::env_utils::patch_gui_runtime_env(self.hidpi);
-
+  #[cfg(not(target_os = "macos"))]
+  fn prepare_openssl(&self) -> anyhow::Result<Option<NamedTempFile>> {
     if self.fix_openssl {
       info!("Fixing OpenSSL environment");
       let file = openssl::fix_openssl_env()?;
@@ -139,13 +177,22 @@ impl Cli {
   }
 
   async fn run(&self) -> anyhow::Result<()> {
+    if self.browser_listen.is_some()
+      && !matches!(self.browser.as_deref(), Some(browser) if browser.eq_ignore_ascii_case("manual") || browser.eq_ignore_ascii_case("remote"))
+    {
+      anyhow::bail!("The '--browser-listen' option requires '--browser manual'");
+    }
+
     if self.ignore_tls_errors {
       info!("TLS errors will be ignored");
     }
 
-    let openssl_conf = self.prepare_env()?;
+    #[cfg(feature = "webview-auth")]
+    gpapi::utils::env_utils::patch_gui_runtime_env(self.hidpi);
+    #[cfg(not(target_os = "macos"))]
+    let openssl_conf = self.prepare_openssl()?;
 
-    let server = normalize_server(&self.server)?;
+    let server = normalize_server(self.server.as_deref().expect("server is required for authentication"))?;
     let gp_params = self.build_gp_params();
     info!(
       "gpauth auth host-id: {}",
@@ -154,7 +201,17 @@ impl Cli {
 
     let auth_request = match self.saml_request.as_deref() {
       Some(auth_request) => auth_request.to_string(),
-      None => auth_prelogin(&server, &gp_params, self.external_browser_requested(), self.gateway).await?,
+      None => match auth_prelogin(&server, &gp_params, self.external_browser_requested(), self.gateway).await {
+        Ok(request) => request,
+        Err(error) => {
+          let Some(tls) = error.downcast_ref::<ServerTlsError>().cloned() else {
+            return Err(error);
+          };
+          handle_error(error, self);
+          print_auth_result(Err(tls.into()), None);
+          return Ok(());
+        }
+      },
     };
 
     #[cfg(feature = "webview-auth")]
@@ -168,18 +225,28 @@ impl Cli {
 
     if let Some(browser) = browser {
       let auth_host_id = gp_params.os_profile().host_identity().host_id().to_string();
-      let authenticator = BrowserAuthenticator::new(&auth_request, browser);
+      let authenticator = BrowserAuthenticator::new(&auth_request, browser, self.browser_listen);
       let auth_result = authenticator.authenticate().await;
 
       print_auth_result(auth_result, Some(&auth_host_id));
 
-      // explicitly drop openssl_conf to avoid the unused variable warning
+      #[cfg(not(target_os = "macos"))]
       drop(openssl_conf);
       return Ok(());
     }
 
     #[cfg(feature = "webview-auth")]
-    crate::webview_auth::authenticate(server, gp_params, auth_request, self.clean, openssl_conf).await?;
+    crate::webview_auth::authenticate(
+      server,
+      gp_params,
+      auth_request,
+      self.clean,
+      self.window_title.clone(),
+      self.window_theme,
+      #[cfg(not(target_os = "macos"))]
+      openssl_conf,
+    )
+    .await?;
 
     Ok(())
   }
@@ -218,23 +285,28 @@ impl Cli {
   }
 }
 
-fn build_logger(cli: &Cli) -> env_logger::Builder {
-  let mut builder = env_logger::builder();
-  builder.filter_level(cli.verbose.log_level_filter());
+fn init_logger(cli: &Cli) {
+  let Some(level) = cli.verbose.log_level_filter().to_level() else {
+    log::set_max_level(log::LevelFilter::Off);
+    return;
+  };
 
-  // Text is env_logger's own format, so leave it untouched rather than
-  // reimplementing it.
-  if cli.log_format == LogFormat::Json {
-    builder.format(write_json_record);
-  }
-
-  builder
+  gpapi::logger::init(level, "com.yuezk.gpgui", "gpauth", cli.log_format);
 }
 
 pub async fn run() {
   let cli = Cli::parse();
 
-  build_logger(&cli).init();
+  #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
+  if let Some(CliCommand::AuthCallback { callback }) = &cli.command {
+    if let Err(err) = forward_auth_callback(callback).await {
+      eprintln!("Failed to forward authentication callback: {err}");
+      std::process::exit(1);
+    }
+    return;
+  }
+
+  init_logger(&cli);
   info!("gpauth started: {}", VERSION);
 
   if let Err(err) = cli.run().await {
@@ -244,7 +316,11 @@ pub async fn run() {
 }
 
 pub fn print_auth_result(auth_result: anyhow::Result<SamlAuthData>, host_id: Option<&str>) {
-  let auth_result = match auth_result {
+  println!("{}", json!(auth_outcome(auth_result, host_id)));
+}
+
+fn auth_outcome(auth_result: anyhow::Result<SamlAuthData>, host_id: Option<&str>) -> SamlAuthResult {
+  match auth_result {
     Ok(auth_data) => {
       let auth_data = match host_id {
         Some(host_id) => auth_data.with_host_id(host_id),
@@ -252,22 +328,54 @@ pub fn print_auth_result(auth_result: anyhow::Result<SamlAuthData>, host_id: Opt
       };
       SamlAuthResult::Success(auth_data)
     }
-    Err(err) => SamlAuthResult::Failure(format!("{}", err)),
-  };
-
-  println!("{}", json!(auth_result));
+    Err(err) if err.downcast_ref::<AuthenticationCancelled>().is_some() => SamlAuthResult::Cancelled,
+    Err(err) => match err.downcast::<ServerTlsError>() {
+      Ok(tls) => SamlAuthResult::ServerTlsError(tls),
+      Err(err) => SamlAuthResult::Failure(err.to_string()),
+    },
+  }
 }
 
 #[cfg(test)]
 mod tests {
-  use std::{
-    io::Write,
-    sync::{Arc, Mutex},
-  };
-
-  use log::Log;
-
   use super::*;
+
+  #[test]
+  fn openssl_option_is_available_only_on_supported_platforms() {
+    let result = Cli::try_parse_from(["gpauth", "portal.example.com", "--fix-openssl"]);
+    assert_eq!(result.is_ok(), !cfg!(target_os = "macos"));
+  }
+
+  #[test]
+  fn result_keeps_server_tls_kind_and_generic_failure_format() {
+    use gpapi::error::ServerTlsErrorKind;
+    let tls = ServerTlsError {
+      server: "https://vpn.example.com".into(),
+      kind: ServerTlsErrorKind::LegacyRenegotiation,
+    };
+    let outcome = auth_outcome(Err(anyhow::Error::new(tls).context("retry failed")), None);
+    assert_eq!(
+      serde_json::to_value(outcome).unwrap(),
+      json!({"serverTlsError": {"server": "https://vpn.example.com", "kind": "legacyRenegotiation"}})
+    );
+    assert_eq!(
+      serde_json::to_value(auth_outcome(Err(anyhow::anyhow!("rejected")), None)).unwrap(),
+      json!({"failure": "rejected"})
+    );
+  }
+
+  #[test]
+  fn retry_result_preserves_client_certificate_requirement() {
+    let error = ServerTlsError {
+      server: "https://vpn.example.com".into(),
+      kind: gpapi::error::ServerTlsErrorKind::ClientCertificateRequired,
+    };
+    let outcome = auth_outcome(Err(anyhow::Error::new(error).context("retry failed")), None);
+    assert_eq!(
+      serde_json::to_value(outcome).unwrap(),
+      json!({"serverTlsError": {"server": "https://vpn.example.com", "kind": "clientCertificateRequired"}})
+    );
+  }
 
   /// gpauth's own result already goes to stdout as JSON; this makes its *logs*
   /// readable the same way, so a caller driving it does not have to parse prose
@@ -287,58 +395,28 @@ mod tests {
     assert_eq!(cli.log_format, LogFormat::Json);
   }
 
-  /// A `Write` that keeps what was written, so the logger can be driven for
-  /// real instead of asserting on how it was configured.
-  #[derive(Clone, Default)]
-  struct Captured(Arc<Mutex<Vec<u8>>>);
-
-  impl Write for Captured {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-      self.0.lock().unwrap().extend_from_slice(buf);
-      Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-      Ok(())
-    }
-  }
-
-  #[test]
-  fn json_format_emits_one_json_object_per_record() {
-    let cli =
-      Cli::try_parse_from(["gpauth", "portal.example.com", "--log-format", "json"]).expect("gpauth args should parse");
-
-    let captured = Captured::default();
-    let logger = build_logger(&cli)
-      .target(env_logger::Target::Pipe(Box::new(captured.clone())))
-      .build();
-
-    // Drive the logger directly: `init()` installs a global that a second test
-    // could not replace.
-    logger.log(
-      &log::Record::builder()
-        .level(log::Level::Info)
-        .target("gpauth")
-        .args(format_args!("authenticating against {}", "portal.example.com"))
-        .build(),
-    );
-    logger.flush();
-
-    let out = String::from_utf8(captured.0.lock().unwrap().clone()).expect("log output should be UTF-8");
-    let lines: Vec<_> = out.lines().collect();
-    assert_eq!(lines.len(), 1, "expected exactly one line, got: {out:?}");
-
-    let v: serde_json::Value = serde_json::from_str(lines[0]).unwrap_or_else(|e| panic!("not JSON: {out:?} ({e})"));
-    assert_eq!(v["level"], "INFO");
-    assert_eq!(v["target"], "gpauth");
-    assert_eq!(v["message"], "authenticating against portal.example.com");
-  }
-
   #[test]
   fn os_defaults_to_runtime_os() {
     let cli = Cli::try_parse_from(["gpauth", "portal.example.com"]).expect("gpauth args should parse");
 
     assert_eq!(cli.os, Os::default());
+  }
+
+  #[test]
+  #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
+  fn callback_arguments_parse_separately() {
+    let cli = Cli::try_parse_from([
+      "gpauth",
+      "auth-callback",
+      "globalprotectcallback:cas-as=1&un=alice@example.com&token=token",
+    ])
+    .unwrap();
+
+    assert!(matches!(
+      cli.command,
+      Some(CliCommand::AuthCallback { callback }) if callback.starts_with("globalprotectcallback:")
+    ));
+    assert!(cli.server.is_none());
   }
 
   #[test]
@@ -376,6 +454,21 @@ mod tests {
   }
 
   #[test]
+  fn browser_listen_accepts_ip_address() {
+    let cli = Cli::try_parse_from([
+      "gpauth",
+      "portal.example.com",
+      "--browser",
+      "manual",
+      "--browser-listen",
+      "192.168.107.15",
+    ])
+    .expect("gpauth args should parse");
+
+    assert_eq!(cli.browser_listen, Some("192.168.107.15".parse().unwrap()));
+  }
+
+  #[test]
   fn client_version_arg_sets_profile_client_version() {
     let cli = Cli::try_parse_from(["gpauth", "portal.example.com", "--client-version", "legacy-client"])
       .expect("gpauth args should parse");
@@ -402,5 +495,22 @@ mod tests {
     assert_eq!(cli.certificate.as_deref(), Some("/tmp/client.pem"));
     assert_eq!(cli.sslkey.as_deref(), Some("/tmp/client.key"));
     assert_eq!(cli.key_password.as_deref(), Some("secret"));
+  }
+
+  #[cfg(feature = "webview-auth")]
+  #[test]
+  fn auth_window_options_parse() {
+    let cli = Cli::try_parse_from([
+      "gpauth",
+      "portal.example.com",
+      "--window-title",
+      "GP Connect Login",
+      "--window-theme",
+      "dark",
+    ])
+    .expect("gpauth window options should parse");
+
+    assert_eq!(cli.window_title.as_deref(), Some("GP Connect Login"));
+    assert_eq!(cli.window_theme, AuthWindowTheme::Dark);
   }
 }

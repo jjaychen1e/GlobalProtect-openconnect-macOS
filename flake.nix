@@ -20,19 +20,17 @@
       nixpkgs,
       rust-overlay,
     }:
-    flake-utils.lib.eachDefaultSystem (
-      system:
+    let
+      mkPackageSet =
+        pkgs:
       let
-        pkgs = (import nixpkgs) {
-          inherit system;
-          overlays = [ (import rust-overlay) ];
-        };
         inherit (pkgs) lib;
 
         cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
         pname = "globalprotect-openconnect";
         version = cargoToml.workspace.package.version;
-        releaseTag = "v2.6.5";
+        releaseTag = "v3.2.0";
+        releaseVersion = "3.2.0";
 
         toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
 
@@ -41,43 +39,86 @@
           rustc = toolchain;
         };
 
-        src = pkgs.fetchzip {
-          url = "https://github.com/yuezk/GlobalProtect-openconnect/releases/download/${releaseTag}/globalprotect-openconnect-${version}.tar.gz";
-          hash = "sha256-T4jze6/25YTsfuQdcuDfz3kX/ooDB1T0hnWsEBu4xMQ=";
+        unpackReleaseAsset =
+          { name, archive }:
+          pkgs.runCommand name { nativeBuildInputs = [ pkgs.libarchive ]; } ''
+            mkdir -p "$out"
+            bsdtar --extract --file ${archive} --directory "$out" --strip-components 1
+          '';
+
+        src = lib.cleanSourceWith {
+          src = lib.cleanSource ./.;
+          filter = path: type:
+            !(builtins.elem (builtins.baseNameOf path) [ "target" ".build" "node_modules" ]);
         };
 
         cpu = pkgs.stdenv.hostPlatform.parsed.cpu.name;
 
         gpguiHashes = {
-          x86_64 = "sha256-wPLsH/b/ZSo2pA/kU1HUGiQ98k8xSihyxGyf5o6tvyU=";
-          aarch64 = "sha256-WFyPhGD9fLAVYGeMSrMcZhSdfM99uVmWPrH68O+4BfE=";
+          x86_64 = "sha256-Y0MbRebzQCPjvXUyWF8grBxGPuvDhIlnvEoEkFl5WMI=";
+          aarch64 = "sha256-TnQPKllHSRfl/ir6PYZE6dVb8XUtayg7CRZUkWE4jsw=";
         };
 
-        gpgui = pkgs.fetchzip {
+        gpguiArchive = pkgs.fetchurl {
           url = "https://github.com/yuezk/GlobalProtect-openconnect/releases/download/${releaseTag}/gpgui_${cpu}.bin.tar.xz";
           hash = gpguiHashes.${cpu};
         };
 
-        binaryHashes = {
-          x86_64 = "sha256-spaKxruu15ro5lir14nAfy8MPXNQhaoCXcG4PDZ9lfM=";
-          aarch64 = "sha256-iu/zE4B4gjk1I5PQY0m/59ZoJ/k5focT0CxYYlJi7+A=";
+        gpgui = unpackReleaseAsset {
+          name = "gpgui-${releaseVersion}-${cpu}";
+          archive = gpguiArchive;
         };
 
-        binaryPackage = pkgs.fetchzip {
-          url = "https://github.com/yuezk/GlobalProtect-openconnect/releases/download/${releaseTag}/globalprotect-openconnect_${version}_${cpu}.bin.tar.xz";
+        binaryHashes = {
+          x86_64 = "sha256-3SvFEL9C8uB+ekp/PygBw0k8vZwdbnBWnvBcfGN8e1A=";
+          aarch64 = "sha256-3lVKM1lnYQsgAboBCRuzEOFY/uB8+lf+yrxIRJJZtV4=";
+        };
+
+        binaryArchive = pkgs.fetchurl {
+          url = "https://github.com/yuezk/GlobalProtect-openconnect/releases/download/${releaseTag}/globalprotect-openconnect_${releaseVersion}_${cpu}.bin.tar.xz";
           hash = binaryHashes.${cpu};
+        };
+
+        binaryPackage = unpackReleaseAsset {
+          name = "globalprotect-openconnect-${releaseVersion}-${cpu}-binary";
+          archive = binaryArchive;
         };
 
         linuxRuntimeDependencies = with pkgs; [
           glib-networking
           libayatana-appindicator
+          xdg-utils
         ];
+
+        runtimeTools = with pkgs; [ coreutils iproute2 systemd procps util-linux nettools xdg-utils ];
+
+        nativeRuntimeWrapping = lib.optionalString pkgs.stdenv.isLinux ''
+          gappsWrapperArgs+=(
+            --prefix PATH : "/run/wrappers/bin:${lib.makeBinPath runtimeTools}"
+            --set GP_COMMAND_PATH "${lib.makeBinPath runtimeTools}"
+            --set-default GP_VPNC_SCRIPT "$out/libexec/gpclient/vpnc-script"
+            --set-default GP_CLIENT_BINARY "$out/bin/gpclient"
+            --set-default GP_SERVICE_BINARY "$out/bin/gpservice"
+            --set-default GP_AUTH_BINARY "$out/bin/gpauth"
+            --set-default GP_GUI_BINARY "$out/bin/gpgui"
+            --set-default GP_GUI_HELPER_BINARY "$out/bin/gpgui-helper"
+            --set-default GP_VPNC_SCRIPT_INSTALLER_BINARY "$out/libexec/gpclient/gp-vpnc-script-installer"
+            --set-default GP_HIP_SCRIPT_INSTALLER_BINARY "$out/libexec/gpclient/gp-hip-script-installer"
+          )
+        '';
+
+        rewriteVpncScriptToolPaths = lib.optionalString pkgs.stdenv.isLinux ''
+          substituteInPlace $out/libexec/gpclient/vpnc-script \
+            --replace-fail /usr/bin/resolvectl ${pkgs.systemd}/bin/resolvectl \
+            --replace-fail /usr/bin/busctl ${pkgs.systemd}/bin/busctl
+        '';
 
         linuxBuildInputs =
           with pkgs;
           [
             libxml2
             zlib
+            openssl
             lz4
             gnutls
             p11-kit
@@ -90,40 +131,9 @@
             libsoup_3
             webkitgtk_4_1
             glib-networking
-            openssl
             libsecret
             libayatana-appindicator
           ];
-
-        rewriteSourceInstallPaths = ''
-          substituteInPlace $out/libexec/gpclient/hipreport.sh \
-            --replace-fail /usr/bin/gpclient $out/bin/gpclient
-        ''
-        + lib.optionalString pkgs.stdenv.isLinux ''
-          substituteInPlace $out/share/applications/gpgui.desktop \
-            --replace-fail /usr/bin/gpclient /run/current-system/sw/bin/gpclient
-
-          substituteInPlace $out/share/polkit-1/actions/com.yuezk.gpgui.policy \
-            --replace-fail /usr/bin/gpservice $out/bin/gpservice
-
-          if [ -f $out/lib/NetworkManager/dispatcher.d/pre-down.d/gpclient.down ]; then
-            substituteInPlace $out/lib/NetworkManager/dispatcher.d/pre-down.d/gpclient.down \
-              --replace-fail /usr/bin/gpclient $out/bin/gpclient
-          fi
-        '';
-
-        rewriteHostInstallPaths = ''
-          substituteInPlace $out/share/applications/gpgui.desktop \
-            --replace-fail /usr/bin/gpclient /run/current-system/sw/bin/gpclient
-
-          substituteInPlace $out/share/polkit-1/actions/com.yuezk.gpgui.policy \
-            --replace-fail /usr/bin/gpservice $out/bin/gpservice
-
-          if [ -f $out/lib/NetworkManager/dispatcher.d/pre-down.d/gpclient.down ]; then
-            substituteInPlace $out/lib/NetworkManager/dispatcher.d/pre-down.d/gpclient.down \
-              --replace-fail /usr/bin/gpclient $out/bin/gpclient
-          fi
-        '';
 
         installNixosPolkitRule = ''
           chmod u+w $out/share $out/share/polkit-1 2>/dev/null || true
@@ -141,12 +151,20 @@
           EOF
         '';
 
-        fromSource = naersk'.buildPackage {
-          inherit pname version src;
+        fromSource = lib.makeOverridable ({ gui ? gpgui }: naersk'.buildPackage {
+          inherit pname version;
+          src = assert lib.assertMsg
+            (builtins.pathExists (src + "/crates/openconnect/deps/openconnect/configure.ac")
+              && builtins.pathExists (src + "/crates/openconnect/deps/libxml2/configure.ac"))
+            "Source builds require initialized Git submodules; use a git+ flake URL with submodules=1.";
+            src;
           name = "globalprotect-openconnect";
 
           # Must be set to true to avoid issues with the Tauri build process
           singleStep = true;
+
+          # The Makefile installs executables together with their supporting files.
+          copyBins = false;
 
           cargoBuildOptions =
             old:
@@ -168,6 +186,9 @@
               libtool
               pkg-config
             ]
+            ++ lib.optionals stdenv.isDarwin [
+              darwin.sigtool
+            ]
             ++ lib.optionals stdenv.isLinux [
               autoPatchelfHook
               wrapGAppsHook4
@@ -175,49 +196,27 @@
 
           runtimeDependencies = lib.optionals pkgs.stdenv.isLinux linuxRuntimeDependencies;
 
-          overrideMain =
-            { ... }:
-            {
-              postPatch = ''
-                substituteInPlace crates/openconnect/src/vpn_utils.rs \
-                  --replace-fail /usr/libexec/gpclient/vpnc-script $out/libexec/gpclient/vpnc-script \
-                  --replace-fail /usr/libexec/gpclient/hipreport.sh $out/libexec/gpclient/hipreport.sh
-
-                substituteInPlace crates/common/src/constants.rs \
-                  --replace-fail /usr/bin/gpclient $out/bin/gpclient \
-                  --replace-fail /usr/bin/gpauth $out/bin/gpauth \
-                  --replace-fail /opt/homebrew/ $out/
-              ''
-              + lib.optionalString pkgs.stdenv.isLinux ''
-                substituteInPlace crates/common/src/constants.rs \
-                  --replace-fail /usr/bin/gpservice $out/bin/gpservice \
-                  --replace-fail /usr/bin/gpgui-helper $out/bin/gpgui-helper \
-                  --replace-fail /usr/bin/gpgui $out/bin/gpgui
-              '';
-            };
+          preFixup = nativeRuntimeWrapping;
 
           postInstall = ''
-            cp -r packaging/files/usr/libexec $out/libexec
+            make install PREFIX="$out" ${lib.optionalString pkgs.stdenv.isLinux ''GPGUI_BINARY="${gui}/gpgui"''}
           ''
           + lib.optionalString pkgs.stdenv.isLinux ''
-            # Copy the prebuilt gpgui binary to the output bin directory
-            cp ${gpgui}/gpgui $out/bin/gpgui
-            chmod +x $out/bin/gpgui
-
-            cp -r packaging/files/usr/share $out/share
-            cp -r packaging/files/usr/lib $out/lib
-
             ${installNixosPolkitRule}
           ''
           + ''
-            ${rewriteSourceInstallPaths}
+            ${rewriteVpncScriptToolPaths}
           '';
-        };
+        }) {};
 
-        prebuiltFiles = pkgs.stdenv.mkDerivation {
+        prebuilt = lib.makeOverridable ({
+          binaries ? binaryPackage,
+          gui ? gpgui,
+          version ? releaseVersion,
+        }: pkgs.stdenv.mkDerivation {
           inherit pname version;
 
-          src = binaryPackage;
+          src = binaries;
           dontBuild = true;
 
           nativeBuildInputs = with pkgs; [
@@ -227,6 +226,7 @@
 
           buildInputs = linuxBuildInputs;
           runtimeDependencies = linuxRuntimeDependencies;
+          preFixup = nativeRuntimeWrapping;
 
           installPhase = ''
             runHook preInstall
@@ -240,142 +240,65 @@
               cp -r artifacts/usr/lib $out/lib
             fi
 
-            install -Dm755 ${gpgui}/gpgui $out/bin/gpgui
+            install -Dm755 ${gui}/gpgui $out/bin/gpgui
 
-            runHook postInstall
-          '';
-        };
-
-        prebuiltCommand =
-          binaryName:
-          pkgs.buildFHSEnv {
-            name = binaryName;
-            targetPkgs = pkgs: [ prebuiltFiles ] ++ linuxBuildInputs ++ linuxRuntimeDependencies;
-            runScript = "/usr/bin/${binaryName}";
-            profile = ''
-              export PATH=/run/wrappers/bin:$PATH
-            '';
-            extraBwrapArgs = [
-              "--bind-try"
-              "/run/wrappers"
-              "/run/wrappers"
-              "--ro-bind-try"
-              "/etc/gpgui"
-              "/etc/gpgui"
-            ];
-          };
-
-        prebuiltCommands = {
-          gpclient = prebuiltCommand "gpclient";
-          gpservice = prebuiltCommand "gpservice";
-          gpauth = prebuiltCommand "gpauth";
-          gpgui = prebuiltCommand "gpgui";
-          gpgui-helper = prebuiltCommand "gpgui-helper";
-        };
-
-        prebuilt = pkgs.stdenv.mkDerivation {
-          inherit pname version;
-
-          dontUnpack = true;
-
-          installPhase = ''
-            runHook preInstall
-
-            mkdir -p $out/bin
-            cat > $out/bin/gpclient <<'EOF'
-            #!${pkgs.runtimeShell}
-            set -eu
-
-            gpclient_fhs='${prebuiltCommands.gpclient}/bin/gpclient'
-            gpservice_public='@gpservice_public@'
-
-            if [ "''${1:-}" = "launch-gui" ]; then
-              shift
-
-              auth_data=
-              minimized=
-              for arg in "$@"; do
-                case "$arg" in
-                  --minimized)
-                    minimized=--minimized
-                    ;;
-                  --*)
-                    ;;
-                  *)
-                    auth_data=$arg
-                    ;;
-                esac
-              done
-
-              if [ -z "$auth_data" ]; then
-                if [ -n "''${XDG_DATA_HOME:-}" ]; then
-                  data_home=$XDG_DATA_HOME
-                elif [ -n "''${HOME:-}" ]; then
-                  data_home=$HOME/.local/share
-                else
-                  data_home=/tmp
-                fi
-
-                log_dir="$data_home/gpclient"
-                mkdir -p "$log_dir"
-                log_file="$log_dir/gpclient.log"
-                env_file=$(mktemp)
-
-                env > "$env_file"
-                printf 'GP_LOG_FILE=%s\n' "$log_file" >> "$env_file"
-
-                pkexec_bin=/run/wrappers/bin/pkexec
-                if [ ! -x "$pkexec_bin" ]; then
-                  pkexec_bin=pkexec
-                fi
-
-                set +e
-                if [ -n "$minimized" ]; then
-                  "$pkexec_bin" --user root "$gpservice_public" --minimized --env-file "$env_file" 2>"$log_file"
-                else
-                  "$pkexec_bin" --user root "$gpservice_public" --env-file "$env_file" 2>"$log_file"
-                fi
-                status=$?
-                set -e
-                rm -f "$env_file"
-                exit "$status"
-              fi
-
-              set -- launch-gui "$@"
-            fi
-
-            exec "$gpclient_fhs" "$@"
-            EOF
-            substituteInPlace $out/bin/gpclient \
-              --replace-fail '@gpservice_public@' "$out/bin/gpservice"
-            chmod +x $out/bin/gpclient
-
-            cat > $out/bin/gpservice <<'EOF'
-            #!${pkgs.runtimeShell}
-            set -eu
-            exec '@gpservice_fhs@' "$@"
-            EOF
-            substituteInPlace $out/bin/gpservice \
-              --replace-fail '@gpservice_fhs@' '${prebuiltCommands.gpservice}/bin/gpservice'
-            chmod +x $out/bin/gpservice
-
-            ln -s ${prebuiltCommands.gpauth}/bin/gpauth $out/bin/gpauth
-            ln -s ${prebuiltCommands.gpgui}/bin/gpgui $out/bin/gpgui
-            ln -s ${prebuiltCommands."gpgui-helper"}/bin/gpgui-helper $out/bin/gpgui-helper
-
-            cp -r ${prebuiltFiles}/libexec $out/libexec
-            cp -r ${prebuiltFiles}/share $out/share
-
-            if [ -d ${prebuiltFiles}/lib ]; then
-              cp -r ${prebuiltFiles}/lib $out/lib
-            fi
-
-            ${rewriteHostInstallPaths}
+            ${rewriteVpncScriptToolPaths}
+            sh ${./scripts/relocate-install-paths.sh} "$out" /usr "$out"
             ${installNixosPolkitRule}
 
             runHook postInstall
           '';
+        }) {};
+
+      in
+      {
+        inherit fromSource prebuilt;
+      };
+
+      nixosModule =
+        {
+          config,
+          lib,
+          options,
+          pkgs,
+          ...
+        }:
+        let
+          cfg = config.programs.globalprotect-openconnect;
+        in
+        {
+          options.programs.globalprotect-openconnect = {
+            enable = lib.mkEnableOption "GlobalProtect-openconnect";
+
+            package = lib.mkOption {
+              type = lib.types.package;
+              # Use the NixOS module's package set so WebKit and graphics
+              # dependencies match the rest of the system.
+              default = (mkPackageSet pkgs).prebuilt;
+              description = "GlobalProtect-openconnect package to install.";
+            };
+          };
+
+          config = lib.mkIf cfg.enable {
+            environment.systemPackages = [ cfg.package ];
+            services.ayatana-indicators.enable = lib.mkDefault true;
+            security.polkit = {
+              enable = true;
+            } // lib.optionalAttrs (options.security.polkit ? enablePkexecWrapper) {
+              enablePkexecWrapper = true;
+            };
+          };
         };
+    in
+    (flake-utils.lib.eachDefaultSystem (
+      system:
+      let
+        pkgs = (import nixpkgs) {
+          inherit system;
+          overlays = [ (import rust-overlay) ];
+        };
+        inherit (pkgs) lib;
+        inherit (mkPackageSet pkgs) fromSource prebuilt;
       in
       {
         # For `nix build`
@@ -403,5 +326,8 @@
           ];
         };
       }
-    );
+    ))
+    // {
+      nixosModules.default = nixosModule;
+    };
 }

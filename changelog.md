@@ -1,5 +1,134 @@
 # Changelog
 
+## 3.2.0
+
+### Added
+
+- Added Local Proxy mode with configurable SOCKS5 and HTTP listeners, so selected apps can use the VPN without changing system routes or DNS.
+- Added a gateway IP preference for trying IPv4 or IPv6 first, available in Settings and through `gpclient connect --ip-preference`.
+
+### Improved
+
+- Enabled switching between the macOS main window and menu bar popover without restarting the app.
+- Refined gateway selection, connection status, and proxy listener details.
+- Made numeric settings validation clearer before saving.
+
+### Fixed
+
+- Fixed VPN shutdown waiting too long when a gateway stops responding to logout.
+- Fixed segmented controls sometimes losing the selected option when clicked.
+- Fixed app shortcuts failing to open with some Linux and BSD desktop launchers.
+- Fixed invisible desktop icons on systems using older versions of librsvg.
+
+## 3.1.0
+
+### Added
+
+- Added a Connection Details panel showing VPN information and live upload and download activity.
+- Added an optional terminal dashboard showing connection status and logs, enabled with `--dashboard`.
+- Added client certificate setup in Settings, with guidance when a VPN requires a certificate.
+
+### Improved
+
+- Refreshed Settings and dialogs, with automatic saving for most settings and Save and Cancel buttons for detailed edits.
+- Made sign-in errors clearer and added recovery options within the app.
+- Added a website address bar to the sign-in window.
+- Expanded support for client certificate files, including password-protected files, with clearer file and password errors.
+- Improved license activation error messages and troubleshooting logs.
+
+### Fixed
+
+- Fixed sign-in retries losing the selected VPN server after a security error.
+- Fixed mismatched certificate and key files being accepted and replacing a working certificate setup.
+- Fixed failed saves discarding certificate details or custom device report (HIP) edits, allowing a retry without re-entering changes.
+- Fixed theme, automatic-update, and logging settings appearing saved when saving had failed; errors are now shown and previous settings remain in use.
+- Fixed notifications disappearing too quickly on GNOME and clarified notification sender names and update titles.
+- Fixed connection failures with some VPN gateways.
+
+### Command-line notes
+
+- Renamed copy-and-paste browser sign-in to `--browser manual`; existing commands using `--browser remote` still work.
+- Removed the unneeded `--fix-openssl` option on macOS; existing macOS commands and scripts must omit it.
+
+## 3.0.5
+
+### Added
+
+- Added adaptive macOS app icons for light and dark appearances.
+
+### Fixed
+
+- Fixed macOS browser sign-in by automatically selecting the installed callback handler.
+- Improved app icon proportions in Finder and across the app, installer, and website.
+
+## 3.0.4
+
+### Added
+
+- Added `gpclient connect --background` with connection logs and graceful disconnect.
+
+### Fixed
+
+- Improved macOS service startup, relaunch, and quit responsiveness.
+- Updated app icons for clearer artwork across platforms.
+
+## 3.0.3
+
+### Fixed
+
+- Improved Wayland crash recovery on Linux and BSD.
+- Fixed pasted callbacks and prompts for remote browser sign-in.
+- Fixed legacy TLS configuration while preserving device identities.
+- Fixed diagnostics when optional tools are unavailable.
+- Fixed bundled macOS library paths and polished release notes in About.
+
+## 3.0.2
+
+### Added
+
+- Added `gpclient diagnostics` to collect system and client information for troubleshooting.
+
+### Fixed
+
+- Recognized WebKit Wayland rendering crashes now trigger one retry with DMABUF disabled when opening the GUI, first-time setup, or embedded browser sign-in.
+- Improved desktop rendering with opaque windows to reduce transparency-related flickering on Linux and BSD.
+- Browser sign-in retries refresh authentication data, and repeated failures report both attempts instead of leaving the client waiting.
+- Cancelling startup or sign-in now stops pending desktop child processes and version checks.
+
+## 3.0.1
+
+### Fixed
+
+- Fixed the bundled macOS CLI when launched through Homebrew.
+- Fixed browser sign-in failures leaving the CLI waiting without an error.
+- Fixed first-time startup on Linux and BSD when no system keyring is available.
+- Improved tray menu behavior on Linux and BSD.
+- Added clearer results when manually checking for updates.
+- Improved desktop dialogs, settings, keyboard focus, and Linux window controls.
+
+## 3.0.0
+
+### Added
+
+- GP Connect for Apple silicon Macs running macOS 13 or later.
+- Support for internal gateways that authenticate your device without creating a VPN tunnel.
+- More control over device compliance reports (HIP), including generated reports and custom scripts.
+- Desktop update notifications, with in-app updates on macOS and links to new releases on Linux and BSD.
+- JSON log output for CLI integrations and automation.
+
+### Changed
+
+- Refreshed the desktop connection view, gateway selection, and session details.
+- Improved browser sign-in, including opening your normal user's browser when the CLI runs with elevated privileges.
+- Improved session expiry warnings and session extension when allowed by your VPN administrator.
+- Updated license activation and recovery. Start the seven-day desktop trial by verifying your email address in the app.
+
+### Fixed
+
+- Improved cancellation, disconnect, and cached sign-in handling.
+- Improved desktop window and tray behavior across macOS, Linux, FreeBSD, and OpenBSD.
+- Improved package installation and desktop integration on Linux and BSD.
+
 ## 2.6.5
 
 ### Fixed

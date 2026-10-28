@@ -8,43 +8,49 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-common = { path = "../common" }
 gpapi = { path = "../gpapi" }
+common = { path = "../common" }
 
 # Shared dependencies
 anyhow.workspace = true
 log.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["io-util", "net", "time"] }
 
 # Browser auth dependencies
-webbrowser = { version = "1", optional = true }
-open = { version = "5", optional = true }
-which = { workspace = true, optional = true }
+browser-launcher = { path = "../browser-launcher", default-features = false, features = ["launcher"], optional = true }
 tiny_http = { version = "0.12", optional = true }
 uuid = { version = "1", optional = true, features = ["v4"] }
+uzers = { workspace = true, optional = true }
 
 # Webview auth dependencies
 tauri = { workspace = true, optional = true }
 regex = { workspace = true, optional = true }
 tokio-util = { workspace = true, optional = true }
-html-escape = { version = "0.2.13", optional = true }
+html-escape = { version = "0.3", optional = true }
+url = { workspace = true, optional = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies]
 webkit2gtk = { version = "2", optional = true }
+gtk = { version = "0.18", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = { version = "0.6", optional = true }
 objc2 = { version = "0.6", optional = true }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWorkspace", "block2"], optional = true }
 objc2-foundation = { version = "0.3", optional = true }
 objc2-web-kit = { version = "0.3", optional = true }
+objc2-security = { version = "0.3", default-features = false, features = ["std", "SecBase", "SecTrust", "SecCertificate"], optional = true }
 
 [features]
 browser-auth = [
-  "dep:webbrowser",
-  "dep:open",
-  "dep:which",
+  "dep:browser-launcher",
   "dep:tiny_http",
   "dep:uuid",
+  "dep:uzers",
+  "dep:block2",
+  "dep:objc2",
+  "dep:objc2-app-kit",
+  "dep:objc2-foundation",
 ]
 webview-auth = [
   "gpapi/tauri",
@@ -52,9 +58,38 @@ webview-auth = [
   "dep:regex",
   "dep:tokio-util",
   "dep:html-escape",
+  "dep:url",
+  "dep:gtk",
   "dep:webkit2gtk",
   "dep:block2",
   "dep:objc2",
   "dep:objc2-foundation",
   "dep:objc2-web-kit",
+  "dep:objc2-security",
+  "objc2-app-kit/NSAlert",
+  "dep:objc2-app-kit",
+  "objc2-app-kit/NSView",
+  "objc2-app-kit/NSText",
+  "objc2-app-kit/NSTextView",
+  "objc2-app-kit/NSTextContainer",
+  "objc2-app-kit/NSParagraphStyle",
+  "objc2-app-kit/NSFont",
+  "objc2-app-kit/NSBox",
+  "objc2-app-kit/NSButton",
+  "objc2-app-kit/NSButtonCell",
+  "objc2-app-kit/NSEvent",
+  "objc2-app-kit/NSTextField",
+  "objc2-app-kit/NSProgressIndicator",
+  "objc2-app-kit/NSColor",
+  "objc2-app-kit/NSResponder",
+  "objc2-app-kit/NSAccessibilityProtocols",
+  "objc2-app-kit/NSWindow",
+  "objc2-app-kit/NSToolbar",
+  "objc2-app-kit/NSToolbarItem",
+  "objc2-app-kit/NSLayoutAnchor",
+  "objc2-app-kit/NSLayoutConstraint",
 ]
+release-devtools = ["webview-auth", "tauri/devtools"]
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -18,14 +18,12 @@ pub struct HostInfo {
 /// to the client so that it can configure itself accordingly.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct VpnEnv {
+  pub tunnel_state: Option<crate::session::tunnel::TunnelState>,
   /// The VPN connection state
   pub vpn_state: VpnState,
 
   /// The default VPN script path
   pub vpnc_script: Option<String>,
-
-  /// The default CSD wrapper script path
-  pub csd_wrapper: Option<String>,
 
   /// The gpauth executable path
   /// Used by the client to launch gpauth for authentication
