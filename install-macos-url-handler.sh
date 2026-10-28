@@ -52,6 +52,14 @@ if [ ! -w "/Applications" ]; then
     exit 1
 fi
 
+# An app installed by an earlier `sudo` run is owned by root
+if [ -d "$APP_PATH" ] && [ ! -O "$APP_PATH" ] && [ "$(id -u)" != 0 ]; then
+    echo -e "${RED}Error: $APP_PATH is owned by another user${NC}"
+    echo "Please run this script with sudo:"
+    echo "  sudo $0"
+    exit 1
+fi
+
 # Remove existing app if present
 if [ -d "$APP_PATH" ]; then
     echo -e "${YELLOW}Removing existing $APP_NAME...${NC}"
